@@ -18,11 +18,14 @@ Single-context — when domain docs are written, they go to one `CONTEXT.md` and
 
 ### Asking the user a question
 
-**`AskUserQuestion` ends the turn.** Asking is the signal that you are done and it is the user's move.
+**Never use the `AskUserQuestion` tool in this repo. Ask in prose instead.**
 
-- Never call another tool after it in the same turn.
-- Never ask a second question in the same turn.
-- **Never re-issue, reword, or replace a question that is already on screen.** The user may be part-way through typing an answer; replacing the prompt destroys what they have written.
+Rendering a question widget replaces whatever the user is currently typing, and there is no way to know whether they are typing. A turn that does several minutes of tool work and then poses a widget question destroys any reply composed during that work. This has cost real answers more than once.
+
+So:
+
+- Put questions in the message body, as text. Number the options if there are several, and say which one you recommend and why.
+- Asking is still the signal that you are done and it is the user's move — stop after asking.
 - If the user's reply says a question was answered wrongly or approved without them, treat the reply itself as the answer and move on. Do not re-put the question.
 
 ### Pull requests
