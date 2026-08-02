@@ -36,9 +36,11 @@ _Avoid_: orchestrator, main agent, parent, supervisor, coordinator
 ### Confinement
 
 **Policy**:
-The complete set of restrictions a role imposes — filesystem grants, network
-egress, and permitted tools. What an agent is *allowed* to do.
-_Avoid_: permissions, guardrails, rules, config
+One of a fixed set of named, enforceable confinements that a role selects, such
+as `read-only` or `read-write`. Naming one that does not exist is an error, so a
+role can only ask for confinement that is actually implemented.
+_Avoid_: permission mode (already means something else in Claude Code),
+permissions, guardrails, rules, config
 
 **Boundary**:
 The OS-enforced confinement a policy is realised as. What an agent is *able* to
@@ -70,8 +72,8 @@ of any agent that uses it.
 _Avoid_: worktree, checkout, working directory, sandbox dir, project
 
 **Attachment**:
-The binding of an agent to a workspace, carrying the access mode that agent
-gets. One workspace may have several attachments.
+The binding of an agent to a workspace. What the agent may do there follows from
+its role's policy, never from the attachment. One workspace may have several.
 _Avoid_: mount, assignment, link, binding
 
 **Snapshot**:
