@@ -16,6 +16,15 @@ Single-context — when domain docs are written, they go to one `CONTEXT.md` and
 
 ## Workflow
 
+### Asking the user a question
+
+**`AskUserQuestion` ends the turn.** Asking is the signal that you are done and it is the user's move.
+
+- Never call another tool after it in the same turn.
+- Never ask a second question in the same turn.
+- **Never re-issue, reword, or replace a question that is already on screen.** The user may be part-way through typing an answer; replacing the prompt destroys what they have written.
+- If the user's reply says a question was answered wrongly or approved without them, treat the reply itself as the answer and move on. Do not re-put the question.
+
 ### Pull requests
 
 - **Open a PR whenever a piece of work is finished** — don't wait to be asked. "Finished" is defined below.
