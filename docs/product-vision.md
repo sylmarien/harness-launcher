@@ -127,6 +127,11 @@ exactly as if I had started it by hand:
 The view holding all the spawns is the **dashboard**. That name says nothing about
 screen real estate — it might be full screen, it might be a pane.
 
+**Opening a spawn never costs me sight of the others.** I am never made to choose
+between following one piece of work and knowing whether another has stopped and needs
+me; losing the list while reading a spawn would reinstate exactly the hunting this
+product exists to remove.
+
 **What the app shows is always live.** What is running, and what state each spawn is
 in, is a real-time view. There is no refreshing: I never have to ask the app to go and
 look again, and I never have to wonder whether what I am reading is current. This is a
