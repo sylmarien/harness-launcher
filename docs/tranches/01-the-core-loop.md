@@ -1,6 +1,6 @@
 # Tranche 1 — The core loop
 
-> **Status: in progress.** This document defines **the scope of a slice of work** —
+> **Status: frozen.** This document defines **the scope of a slice of work** —
 > which features from the wishlist are in, and which are not.
 >
 > It is deliberately **not**: a design, an implementation plan, a breakdown into
@@ -48,13 +48,27 @@ Each item names the part of the vision it slices from.
   status. The view is live: no refreshing, and no wondering whether what I am reading
   is current. *(→ The experience — Watching work.)*
 
-  **Two statuses, and only two: the agent is working, or the agent has stopped.** The
-  app does not claim to know *why* it stopped — finished, waiting on a question, or
-  dead. "Stopped" is exactly the set that might need me; I glance, I see which ones
-  stopped, I open them and look. So the headline above means, precisely, *see at a
-  glance which ones have stopped* — a promise this tranche can keep, and one that
-  still kills the daily round-trip through several terminals hunting for an idle
-  agent.
+  **Two statuses about the agent: it is working, or it has stopped.** The app does not
+  claim to know *why* it stopped — finished, waiting on a question, or dead. "Stopped"
+  is exactly the set that might need me; I glance, I see which ones stopped, I open them
+  and look. So the headline above means, precisely, *see at a glance which ones have
+  stopped* — a promise this tranche can keep, and one that still kills the daily
+  round-trip through several terminals hunting for an idle agent.
+
+  **And a third status about the app itself: `unknown`.** It means the app cannot
+  determine a spawn's state at all — its instrumentation failed, not the agent. That is
+  a different thing from stopped and I act on it differently: *stopped* means go look at
+  the spawn, *unknown* means something is wrong with the tooling. Collapsing the two
+  would hide a broken app behind a normal-looking list. One extra status, not a family
+  of them — whatever went wrong is a detail I can go and read, never another entry in
+  the vocabulary.
+
+  > **Re-scope, 2026-08-06.** This section originally read "two statuses, and only
+  > two". Working the design surfaced that the app can fail to *know*, which the
+  > original wording left nowhere to put. The rule it was protecting — never infer
+  > *why* an agent stopped — is untouched; `unknown` is not a reason for stopping, it
+  > is the app admitting ignorance about its own instrumentation. Recorded here rather
+  > than absorbed silently.
 
   Inferring *waiting for my input* specifically is deliberately out. The vision already
   warns it may be indistinguishable from a finished turn, and any attempt would key off
