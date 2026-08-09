@@ -1,3 +1,6 @@
 # Git worktrees created by Claude Code subagents running in isolation.
 # Transient scaffolding — never part of the repository.
 .claude/worktrees/
+
+# Rust build output (prototypes)
+target/

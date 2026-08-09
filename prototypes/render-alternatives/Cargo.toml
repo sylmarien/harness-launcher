@@ -1,0 +1,16 @@
+[package]
+name = "render-alternatives"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# PROTOTYPE — throwaway. See issue #4 (the map) and the design record.
+# Evaluates alternatives to two settled decisions: that the app drives tmux
+# rather than embedding terminals, and that it uses plain tmux commands rather
+# than control mode.
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+vt100 = "0.15"
+portable-pty = "0.8"
