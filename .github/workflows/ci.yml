@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make sure the toolchain has what we lint with
+        run: rustup component add rustfmt clippy
+
+      # The tmux tests drive a real tmux on a socket of their own. There is no
+      # fake and no abstraction over it: a second implementation existing only
+      # for tests would make the harness seam "real" on false pretences.
+      - name: Make sure there is a tmux to drive
+        run: command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
+
+      - run: cargo fmt --check
+
+      # --all-targets so the tests are linted too. They are a third of the code
+      # and the place a stray `unwrap` is most likely to be excused.
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - run: cargo test
+
+      # The harness seam is a place, not an abstraction, so it is held in place
+      # mechanically rather than by good intentions. Text matching is fooled by
+      # aliasing — recorded rather than hidden. Reach for a stronger mechanism (a
+      # workspace split, a lint with per-directory scope) when there is a second
+      # author, a second harness, or a reason to bar the pure side from an
+      # external dependency.
+      # tmux is reached through a process, so barring processes bars it too —
+      # which is why the pattern names no multiplexer.
+      - name: The harness module performs no I/O
+        run: |
+          if grep -rEn 'std::process|std::fs|Command::' src/harness/; then
+            echo "::error::The harness module translates; the app acts. It must not touch a process or the filesystem."
+            exit 1
+          fi
+
+      - name: Nothing outside the harness module names the harness
+        run: |
+          if grep -rEin 'claude|--effort|CLAUDE_CODE' src/ --exclude-dir=harness; then
+            echo "::error::A harness-specific fact — a binary name, a flag, an environment variable, a status vocabulary, a screen shape — escaped src/harness/."
+            exit 1
+          fi
