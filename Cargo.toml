@@ -1,0 +1,21 @@
+[package]
+name = "harness-launcher"
+version = "0.1.0"
+edition = "2024"
+
+# Clippy's warn-by-default groups are not the whole of it. `pedantic` is the one
+# worth adding here: it is opinionated rather than unstable, and most of what it
+# catches is a place where an intent was left unstated. The negative priority is
+# what lets a single lint be allowed back afterwards — group and lint would
+# otherwise be applied in an unspecified order.
+#
+# `nursery` (unstable, false-positive-prone) and `restriction` (a menu of
+# mutually contradictory lints, not a group to enable wholesale) stay off.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[dependencies]
+ratatui = "0.30.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
