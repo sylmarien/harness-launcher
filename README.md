@@ -4,7 +4,12 @@ Start several Claude Code spawns — each on whatever local git repository you
 choose — from one place, see at a glance which ones need you, and open one to
 answer. No worktree created by hand, no terminals to juggle.
 
-What is here today is the walking skeleton of that: **one** spawn, end to end.
+What is here today is **one** spawn, end to end, with a list beside it that says
+what that spawn is doing.
+
+**Run it from inside tmux.** It composes a window around the session it starts,
+and has to be a pane in that window itself; started anywhere else it refuses and
+says so.
 
 ```
 cargo run -- <repository> "<the work>" [--model <id>] [--level <id>]
@@ -16,8 +21,13 @@ composes a tmux window — the app's list on the left, the session on the right 
 and starts the session in the worktree. You then type into that pane as if you
 had started it yourself; the app never types into it.
 
-Run it from inside tmux and it takes over the current window. Run it from
-outside and it starts a session of its own.
+It takes over the window you are already in: the slot is split off the app's own
+pane, and whatever else you had in that window is left alone.
+
+A supervisor thread then ticks about five times a second and hands the list an
+immutable snapshot of what every spawn is doing: **working**, **stopped**, or
+**unknown** — the last meaning the app's own instrumentation failed rather than
+anything about the agent, with the reason shown beside the row.
 
 `cargo run -- --help` lists the models and effort levels the harness offers.
 
@@ -58,3 +68,8 @@ grep -rEi 'claude|--effort|CLAUDE_CODE' src/ --exclude-dir=harness  # must find 
 They hold the harness seam in place: everything harness-specific lives in
 `src/harness/`, and that module performs no I/O — it translates, and the app
 acts.
+
+The status ladder is built on what tmux, `ps` and the harness print, and none of
+those three is a format this project controls — so its tests read the recordings
+in [`captured/`](captured/README.md) rather than strings written from memory.
+Each recording says how it was made.

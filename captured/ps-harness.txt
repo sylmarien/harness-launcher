@@ -1,0 +1,2 @@
+ 5599  5599 claude          /bin/bash /tmp/harness-capture/claude
+ 5599  5599 sleep           sleep 300

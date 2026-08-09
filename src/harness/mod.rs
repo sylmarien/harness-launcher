@@ -16,7 +16,11 @@
 //! real, and an interface shaped by a single harness is an interface shaped by
 //! *this* harness.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+/// The program a spawn runs.
+const PROGRAM: &str = "claude";
 
 /// One option the harness offers, as the spawn form will show it.
 ///
@@ -144,7 +148,7 @@ pub fn default_effort_level() -> Choice {
 /// and looking can.
 pub fn launch_recipe(spec: &SpawnSpec) -> LaunchRecipe {
     LaunchRecipe {
-        program: "claude".to_string(),
+        program: PROGRAM.to_string(),
         args: vec![
             "--model".to_string(),
             spec.model.clone(),
@@ -157,6 +161,163 @@ pub fn launch_recipe(spec: &SpawnSpec) -> LaunchRecipe {
         env: vec![("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string())],
         cwd: spec.worktree.clone(),
     }
+}
+
+/// What the harness's own record says a session is doing, in the app's words.
+///
+/// Two answers and an admission. The admission is here rather than as an
+/// `Err` because a record that will not resolve is not a failure of the app —
+/// it is one rung of the ladder handing over to the next, and the sentence it
+/// carries is shown to a person rather than logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reading {
+    /// The agent is working.
+    Working,
+    /// The agent has stopped. Finished, waiting on an answer, or dead: the
+    /// harness distinguishes those and the app deliberately does not.
+    Stopped,
+    /// The record did not resolve, and this is what was wrong with it.
+    Unresolved(String),
+}
+
+/// Where the harness records what each of its live sessions is doing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusFiles {
+    directory: PathBuf,
+}
+
+impl StatusFiles {
+    /// The record the harness keeps for the session running as `pid`.
+    pub fn of(&self, pid: u32) -> PathBuf {
+        self.directory.join(format!("{pid}.json"))
+    }
+}
+
+/// The environment variable that moves the harness's configuration elsewhere.
+///
+/// The app reads the environment and hands the answer back to [`status_files`];
+/// the name of the variable is a harness fact, so it lives here.
+pub fn config_directory_variable() -> &'static str {
+    "CLAUDE_CONFIG_DIR"
+}
+
+/// Where the harness keeps its session records, given the environment.
+///
+/// **This is an undocumented internal detail of another program**, present
+/// since v2.1.139, and the app treats it as fallible everywhere: a missing
+/// directory, a missing file, or a record it cannot read is a rung of the
+/// ladder that did not answer, never a refusal and never a status.
+///
+/// `None` means there is nowhere to look at all, which is the same answer as
+/// looking and finding nothing — the caller has one case, not two.
+pub fn status_files(configured: Option<OsString>, home: Option<OsString>) -> Option<StatusFiles> {
+    let configuration = match configured {
+        Some(configured) if !configured.is_empty() => PathBuf::from(configured),
+        _ => match home {
+            Some(home) if !home.is_empty() => Path::new(&home).join(".claude"),
+            _ => return None,
+        },
+    };
+
+    Some(StatusFiles {
+        directory: configuration.join("sessions"),
+    })
+}
+
+/// Read one session record, as kept for the session running as `pid`.
+///
+/// `busy` and `waiting` are both the agent working. `idle` is the agent
+/// stopped, and so is `shell` — a turn that ended with a background shell still
+/// alive, written by versions from v2.1.197.
+///
+/// The record names the process it belongs to, and that is checked against the
+/// process it was looked up by: the files are keyed by process id, and an
+/// operating system hands out process ids again. Believing a record left behind
+/// by a session that has gone would report a spawn as working long after it
+/// stopped, which is the one wrong answer this app is not allowed to give.
+pub fn read_status(record: &str, pid: u32) -> Reading {
+    let record: serde_json::Value = match serde_json::from_str(record) {
+        Ok(record) => record,
+        Err(error) => {
+            return Reading::Unresolved(format!("its session record is not valid JSON: {error}"));
+        }
+    };
+
+    match record["pid"].as_u64() {
+        Some(named) if named == u64::from(pid) => {}
+        Some(named) => {
+            return Reading::Unresolved(format!(
+                "its session record is for process {named}, not {pid} — \
+                 it was left behind by a session that has gone"
+            ));
+        }
+        None => {
+            return Reading::Unresolved(
+                "its session record does not say which process it belongs to".to_string(),
+            );
+        }
+    }
+
+    match record["status"].as_str() {
+        Some("busy" | "waiting") => Reading::Working,
+        Some("idle" | "shell") => Reading::Stopped,
+        Some(unknown) => Reading::Unresolved(format!(
+            "its session record says `{unknown}`, which is not a status this app knows"
+        )),
+        None => Reading::Unresolved(
+            "its session record carries no status — the harness may be older than the \
+             version that writes one"
+                .to_string(),
+        ),
+    }
+}
+
+/// A real session record, copied from a real machine — see
+/// `captured/README.md`. The session it belongs to ran as [`RECORDED_PID`].
+#[cfg(test)]
+const RECORDED: &str = include_str!("../../captured/session-record.json");
+
+/// The process the captured record belongs to.
+#[cfg(test)]
+pub const RECORDED_PID: u32 = 531;
+
+/// The captured record, with a status in it.
+///
+/// **The capture plus one field, not a recording.** The machine this was taken
+/// from writes no `status` at all — see `captured/README.md` — so a record
+/// carrying one could not be recorded here, though the field itself has been
+/// confirmed present on an ordinary install. Everything around it is real.
+///
+/// It lives in the module that knows what a record is, so that the one place a
+/// test departs from a recording is one place rather than several, and so that
+/// replacing the capture one day fixes every test at once.
+#[cfg(test)]
+pub fn recorded(status: &str) -> String {
+    let rest = RECORDED
+        .trim()
+        .strip_prefix('{')
+        .expect("the captured record is an object");
+
+    format!("{{\"status\":\"{status}\",{rest}")
+}
+
+/// Whether a process in a pane's foreground process group is the harness.
+///
+/// Two names, because neither is reliable alone: `command` is what the kernel
+/// reports, **truncated to fifteen characters**, and `argv0` is whatever the
+/// program was started as, which is often a path.
+///
+/// *Accepted blind spot:* a harness started through a wrapper that replaces
+/// both — an interpreter invoked with the harness as its first argument, say —
+/// is not recognised, because the harness's name appears in neither of the two
+/// places looked at. The cost of that is a spawn read as stopped while it
+/// works, which is the direction the app is content to be wrong in; widening
+/// the search to the whole argument vector would trade it for reading `vim
+/// /etc/claude` as a live agent, which is the direction it is not.
+pub fn names_the_harness(command: &str, argv0: &str) -> bool {
+    let program = argv0.rsplit('/').next().unwrap_or_default();
+
+    command == PROGRAM || program == PROGRAM
 }
 
 #[cfg(test)]
@@ -245,5 +406,133 @@ mod tests {
             assert!(!choice.id.is_empty());
             assert!(!choice.label.is_empty());
         }
+    }
+
+    #[test]
+    fn a_working_agent_is_what_busy_and_waiting_both_mean() {
+        assert_eq!(
+            read_status(&recorded("busy"), RECORDED_PID),
+            Reading::Working
+        );
+        assert_eq!(
+            read_status(&recorded("waiting"), RECORDED_PID),
+            Reading::Working
+        );
+    }
+
+    #[test]
+    fn a_stopped_agent_is_what_idle_and_shell_both_mean() {
+        assert_eq!(
+            read_status(&recorded("idle"), RECORDED_PID),
+            Reading::Stopped
+        );
+        assert_eq!(
+            read_status(&recorded("shell"), RECORDED_PID),
+            Reading::Stopped
+        );
+    }
+
+    #[test]
+    fn a_status_this_app_does_not_know_resolves_to_nothing_rather_than_a_guess() {
+        let reading = read_status(&recorded("compacting"), RECORDED_PID);
+
+        let Reading::Unresolved(why) = reading else {
+            panic!("a status from a later harness was mapped anyway: {reading:?}");
+        };
+        assert!(why.contains("compacting"), "{why}");
+    }
+
+    #[test]
+    fn the_record_this_machine_really_writes_carries_no_status_and_says_so() {
+        let reading = read_status(RECORDED, RECORDED_PID);
+
+        let Reading::Unresolved(why) = reading else {
+            panic!("a record with no status resolved to one: {reading:?}");
+        };
+        assert!(why.contains("no status"), "{why}");
+    }
+
+    #[test]
+    fn a_record_left_behind_by_another_process_is_not_believed() {
+        let reading = read_status(&recorded("busy"), RECORDED_PID + 1);
+
+        let Reading::Unresolved(why) = reading else {
+            panic!("a record for another process was read as this one's: {reading:?}");
+        };
+        assert!(why.contains(&RECORDED_PID.to_string()), "{why}");
+    }
+
+    #[test]
+    fn something_that_is_not_a_record_at_all_resolves_to_nothing() {
+        assert!(matches!(
+            read_status("", RECORDED_PID),
+            Reading::Unresolved(_)
+        ));
+        assert!(matches!(
+            read_status("{\"status\": \"bu", RECORDED_PID),
+            Reading::Unresolved(_)
+        ));
+        assert!(matches!(
+            read_status("[]", RECORDED_PID),
+            Reading::Unresolved(_)
+        ));
+    }
+
+    #[test]
+    fn the_records_live_under_the_configuration_directory_the_harness_was_given() {
+        let files = status_files(
+            Some("/elsewhere/config".into()),
+            Some("/home/someone".into()),
+        )
+        .expect("a configured directory is somewhere to look");
+
+        assert_eq!(
+            files.of(4321),
+            PathBuf::from("/elsewhere/config/sessions/4321.json")
+        );
+    }
+
+    #[test]
+    fn unconfigured_the_records_live_under_the_home_directory() {
+        let files = status_files(None, Some("/home/someone".into()))
+            .expect("a home directory is somewhere to look");
+
+        assert_eq!(
+            files.of(4321),
+            PathBuf::from("/home/someone/.claude/sessions/4321.json")
+        );
+    }
+
+    #[test]
+    fn an_empty_configuration_variable_is_treated_as_unset() {
+        let files = status_files(Some("".into()), Some("/home/someone".into()))
+            .expect("a home directory is somewhere to look");
+
+        assert_eq!(
+            files.of(4321),
+            PathBuf::from("/home/someone/.claude/sessions/4321.json")
+        );
+    }
+
+    #[test]
+    fn with_no_home_and_no_configuration_there_is_nowhere_to_look() {
+        assert_eq!(status_files(None, None), None);
+    }
+
+    #[test]
+    fn the_harness_is_recognised_by_a_truncated_name_or_the_path_it_was_started_as() {
+        assert!(names_the_harness("claude", "claude"));
+        assert!(names_the_harness(
+            "stand-in-harnes",
+            "/usr/local/bin/claude"
+        ));
+        assert!(!names_the_harness("bash", "-bash"));
+        assert!(!names_the_harness("sleep", "sleep"));
+        assert!(!names_the_harness("", ""));
+    }
+
+    #[test]
+    fn a_harness_hidden_behind_a_wrapper_is_not_recognised_and_that_is_recorded() {
+        assert!(!names_the_harness("node", "/usr/bin/node"));
     }
 }

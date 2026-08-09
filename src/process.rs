@@ -61,26 +61,6 @@ pub fn run_ok<A: AsRef<str>>(program: &str, args: &[A]) -> Result<String> {
     )))
 }
 
-/// Give a command the terminal, and wait for it to give it back.
-///
-/// Unlike [`run`], this one inherits the app's own input and output rather than
-/// capturing them — it is for the command the user then interacts with.
-pub fn hand_over<A: AsRef<str>>(program: &str, args: &[A]) -> Result<()> {
-    let status = Command::new(program)
-        .args(args.iter().map(AsRef::as_ref))
-        .status()
-        .map_err(|error| could_not_start(program, &error))?;
-
-    if !status.success() {
-        return Err(Error::new(format!(
-            "`{}` exited with {status}",
-            as_written(program, args)
-        )));
-    }
-
-    Ok(())
-}
-
 /// A path on its way to becoming a command-line argument.
 ///
 /// Paths reach `git` and `tmux` as text, so one that is not valid UTF-8 is

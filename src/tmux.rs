@@ -9,6 +9,7 @@
 //! program is, and the arguments are passed one per element, so no shell ever
 //! sees them.
 
+use std::collections::HashMap;
 use std::env;
 
 use crate::error::{Error, Result};
@@ -24,10 +25,19 @@ const SLOT_SHARE: &str = "66%";
 /// tmux's name for "leave a pane behind when what ran in it stops".
 const REMAIN_ON_EXIT: &str = "remain-on-exit";
 
+/// What one tick asks about every pane on the server.
+///
+/// Four fields, one call, however many spawns there are. `pane_dead` is only
+/// meaningful because the slot is created with `remain-on-exit`: without it a
+/// pane that stops disappears, and death would have to be inferred from absence
+/// — which is a different thing, and reported differently.
+const PANE_FORMAT: &str = "#{pane_id} #{pane_dead} #{pane_pid} #{pane_tty}";
+
 /// Whether the app was started from inside tmux.
 ///
-/// This is the whole of mode detection: inside, the app takes over the current
-/// window; outside, it starts a session of its own.
+/// It has to be: the app takes over the window it is already in, and there is
+/// no window to take over otherwise. Started anywhere else, it refuses and says
+/// so rather than building a window and moving the user into it.
 pub fn inside_session() -> bool {
     env::var_os("TMUX").is_some_and(|value| !value.is_empty())
 }
@@ -37,6 +47,60 @@ pub fn current_pane() -> Result<String> {
     env::var("TMUX_PANE").map_err(|_| {
         Error::new("$TMUX_PANE is not set, so the app cannot tell which pane it is in")
     })
+}
+
+/// One pane, as tmux reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pane {
+    /// Whether what ran in it has stopped and left the pane behind.
+    pub dead: bool,
+    /// The process tmux started in it.
+    pub pid: u32,
+    /// The terminal it holds — only worth reading while it is alive, because a
+    /// dead pane's terminal is released and handed to the next pane that asks.
+    pub tty: String,
+}
+
+/// Every pane the server had, at one moment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Panes {
+    panes: HashMap<String, Pane>,
+}
+
+impl Panes {
+    /// Read what one `list-panes` printed.
+    ///
+    /// A line that does not parse is dropped rather than guessed at, which
+    /// makes the pane it described *absent* — and absence is a thing the app
+    /// already has an honest answer for.
+    pub fn parse(listing: &str) -> Self {
+        let panes = listing
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let id = fields.next()?;
+                let dead = fields.next()?;
+                let pid = fields.next()?.parse().ok()?;
+                let tty = fields.next()?;
+
+                Some((
+                    id.to_string(),
+                    Pane {
+                        dead: dead == "1",
+                        pid,
+                        tty: tty.to_string(),
+                    },
+                ))
+            })
+            .collect();
+
+        Self { panes }
+    }
+
+    /// What the server said about one pane, if it had it at all.
+    pub fn get(&self, pane: &str) -> Option<&Pane> {
+        self.panes.get(pane)
+    }
 }
 
 /// A tmux server, and everything the app asks of one.
@@ -92,40 +156,17 @@ impl Server {
         Ok(())
     }
 
-    /// Build the window from nothing and hand the terminal over to it.
-    pub fn open_window(
-        &self,
-        session: &str,
-        list_pane: &[String],
-        recipe: &LaunchRecipe,
-        size: Option<(u16, u16)>,
-    ) -> Result<()> {
-        self.build_window(session, list_pane, recipe, size)?;
-
-        process::hand_over(
-            "tmux",
-            &self.with_socket(&["attach-session", "-t", session]),
-        )
-    }
-
-    /// A session holding the list pane and the slot, detached. Returns the slot.
+    /// Every pane on the server, in one call.
     ///
-    /// The session is created at the terminal's real size where that is known,
-    /// so the layout the user first sees is the one their terminal deserves
-    /// rather than tmux's 80×24 default stretched afterwards.
-    fn build_window(
-        &self,
-        session: &str,
-        list_pane: &[String],
-        recipe: &LaunchRecipe,
-        size: Option<(u16, u16)>,
-    ) -> Result<String> {
-        self.run(&session_arguments(session, list_pane, size))?;
-
-        let slot = self.open_slot(&format!("{session}:"), recipe)?;
-        self.select_pane(&slot)?;
-
-        Ok(slot)
+    /// This is the whole of a tick's subprocess cost: twenty spawns are twenty
+    /// rows of one listing, not twenty questions.
+    pub fn panes(&self) -> Result<Panes> {
+        Ok(Panes::parse(&self.run(&[
+            "list-panes",
+            "-a",
+            "-F",
+            PANE_FORMAT,
+        ])?))
     }
 
     /// Create the slot's pane, and pin the option it was born with to it.
@@ -184,28 +225,6 @@ impl Server {
     }
 }
 
-/// The `new-session` call that creates the window and its list pane.
-fn session_arguments(session: &str, list_pane: &[String], size: Option<(u16, u16)>) -> Vec<String> {
-    let mut arguments = vec![
-        "new-session".to_string(),
-        "-d".to_string(),
-        "-s".to_string(),
-        session.to_string(),
-    ];
-
-    if let Some((columns, rows)) = size {
-        arguments.push("-x".to_string());
-        arguments.push(columns.to_string());
-        arguments.push("-y".to_string());
-        arguments.push(rows.to_string());
-    }
-
-    arguments.push("--".to_string());
-    arguments.extend_from_slice(list_pane);
-
-    arguments
-}
-
 /// The `split-window` call that creates the slot.
 fn split_arguments(target: &str, cwd: &str, recipe: &LaunchRecipe) -> Vec<String> {
     let mut arguments: Vec<String> = [
@@ -252,13 +271,6 @@ mod tests {
             env: vec![("SOME_VARIABLE".to_string(), "1".to_string())],
             cwd: PathBuf::from("/worktrees/add-retry-logic-a7f3"),
         }
-    }
-
-    fn list_pane() -> Vec<String> {
-        ["/usr/local/bin/harness-launcher", "--list-pane", "project"]
-            .iter()
-            .map(|argument| (*argument).to_string())
-            .collect()
     }
 
     /// The argument after `flag`, which is how tmux options are written.
@@ -314,28 +326,46 @@ mod tests {
         assert_eq!(value_after(&arguments, "-t"), "%3");
     }
 
-    #[test]
-    fn a_new_window_is_born_the_size_of_the_terminal_it_replaces() {
-        let arguments = session_arguments("some-session", &list_pane(), Some((130, 40)));
+    /// A real `list-panes` from a real tmux — see `captured/README.md`. Its
+    /// window is the shape the app composes: a list pane, a live slot, and a
+    /// slot whose session stopped and was kept by `remain-on-exit`.
+    const CAPTURED: &str = include_str!("../captured/tmux-list-panes.txt");
 
-        assert_eq!(value_after(&arguments, "-x"), "130");
-        assert_eq!(value_after(&arguments, "-y"), "40");
+    #[test]
+    fn a_live_pane_is_read_with_the_process_and_terminal_it_holds() {
+        let panes = Panes::parse(CAPTURED);
+
+        assert_eq!(
+            panes.get("%3"),
+            Some(&Pane {
+                dead: false,
+                pid: 14634,
+                tty: "/dev/pts/3".to_string(),
+            })
+        );
     }
 
     #[test]
-    fn a_terminal_that_will_not_say_how_big_it_is_leaves_the_sizing_to_tmux() {
-        let arguments = session_arguments("some-session", &list_pane(), None);
+    fn a_pane_whose_session_stopped_is_read_as_dead() {
+        let panes = Panes::parse(CAPTURED);
 
-        assert!(!arguments.contains(&"-x".to_string()), "{arguments:?}");
-        assert!(!arguments.contains(&"-y".to_string()), "{arguments:?}");
+        assert!(panes.get("%2").unwrap().dead);
+        assert!(!panes.get("%0").unwrap().dead);
     }
 
     #[test]
-    fn the_new_window_runs_the_list_pane_in_it() {
-        let arguments = session_arguments("some-session", &list_pane(), Some((130, 40)));
-        let command = &arguments[arguments.iter().position(|a| a == "--").unwrap() + 1..];
+    fn a_pane_the_server_does_not_have_is_simply_absent() {
+        let panes = Panes::parse(CAPTURED);
 
-        assert_eq!(command, list_pane());
+        assert_eq!(panes.get("%99"), None);
+    }
+
+    #[test]
+    fn a_line_that_makes_no_sense_takes_only_its_own_pane_with_it() {
+        let panes = Panes::parse("%0 0 not-a-pid /dev/pts/0\n%1 0 14627 /dev/pts/1\n\n");
+
+        assert_eq!(panes.get("%0"), None);
+        assert_eq!(panes.get("%1").unwrap().pid, 14627);
     }
 
     // The rest is the real thing: a real tmux, on a socket of this test's own,
@@ -363,10 +393,24 @@ mod tests {
             private
         }
 
-        /// A window with one pane in it, minding its own business.
+        /// A window with one pane in it, minding its own business — which is
+        /// what the app finds when it is started: a window somebody else made.
         fn window(&self, session: &str) -> String {
             self.server
-                .run(&session_arguments(session, &sleeping(), Some((120, 30))))
+                .run(&[
+                    "new-session",
+                    "-d",
+                    "-s",
+                    session,
+                    "-x",
+                    "120",
+                    "-y",
+                    "30",
+                    "--",
+                    "sh",
+                    "-c",
+                    "sleep 120",
+                ])
                 .unwrap();
 
             format!("{session}:")
@@ -411,14 +455,6 @@ mod tests {
         fn drop(&mut self) {
             self.kill();
         }
-    }
-
-    /// A pane's worth of doing nothing.
-    fn sleeping() -> Vec<String> {
-        ["sh", "-c", "sleep 120"]
-            .iter()
-            .map(|argument| (*argument).to_string())
-            .collect()
     }
 
     #[test]
@@ -508,23 +544,21 @@ mod tests {
     }
 
     #[test]
-    fn a_window_built_from_nothing_has_the_list_on_the_left_and_the_slot_on_the_right() {
-        let tmux = PrivateTmux::start("window-from-nothing");
+    fn the_app_keeps_the_left_and_the_slot_takes_the_right() {
+        let tmux = PrivateTmux::start("the-app-keeps-the-left");
+        tmux.window("work");
+        let here = tmux.panes("#{pane_id}").trim().to_string();
 
         let slot = tmux
             .server
-            .build_window(
-                "built",
-                &sleeping(),
-                &tmux.recipe("sleep 120"),
-                Some((120, 30)),
-            )
+            .open_slot(&here, &tmux.recipe("sleep 120"))
             .unwrap();
+        tmux.server.select_pane(&slot).unwrap();
 
         let panes =
             tmux.panes("#{pane_id} left=#{pane_left} width=#{pane_width} active=#{pane_active}");
         let rows: Vec<&str> = panes.lines().collect();
-        assert_eq!(rows.len(), 2, "expected a list pane and a slot: {panes}");
+        assert_eq!(rows.len(), 2, "expected the app's pane and a slot: {panes}");
         let list = rows.iter().find(|row| !row.starts_with(&slot)).unwrap();
         let slot_row = rows.iter().find(|row| row.starts_with(&slot)).unwrap();
         assert!(
@@ -542,6 +576,35 @@ mod tests {
         assert!(
             slot_row.contains("width=79"),
             "the slot did not take its share of 120 columns: {panes}"
+        );
+    }
+
+    #[test]
+    fn one_call_reads_the_liveness_of_every_pane_there_is() {
+        let tmux = PrivateTmux::start("one-call-reads-every-pane");
+        let window = tmux.window("work");
+        let alive = tmux
+            .server
+            .open_slot(&window, &tmux.recipe("sleep 120"))
+            .unwrap();
+        let stopped = tmux
+            .server
+            .open_slot(&window, &tmux.recipe("exit 3"))
+            .unwrap();
+        tmux.until("#{pane_dead}", |seen| seen.contains('1'));
+
+        let panes = tmux.server.panes().unwrap();
+
+        let alive = panes.get(&alive).expect("the live slot was not listed");
+        assert!(!alive.dead);
+        assert!(alive.pid > 0, "no process id for a live pane: {alive:?}");
+        assert!(alive.tty.starts_with("/dev/"), "{alive:?}");
+        assert!(
+            panes
+                .get(&stopped)
+                .expect("the stopped slot was not listed")
+                .dead,
+            "the stopped slot did not read as dead"
         );
     }
 }

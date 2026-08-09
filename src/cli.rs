@@ -1,28 +1,20 @@
 //! Reading the command line.
 //!
-//! Two modes, one binary. The mode a person uses starts a spawn; the other draws
-//! the list pane, and exists because the app has to be a pane in the window it
-//! composes — so when it builds that window from scratch it starts itself again
-//! inside it. Not a second program: the same one, in a different mode.
+//! Two things a person can ask for: a spawn, or the usage text. What the app
+//! offers as a choice is not decided here — the model and effort lists come
+//! from the harness, so neither the help text nor what it accepts can drift
+//! from what the harness really takes.
 
-use std::env;
 use std::path::PathBuf;
 
-use crate::app::View;
 use crate::error::{Error, Result};
 use crate::harness::{self, Choice};
-
-/// The flag that selects the list pane mode. Internal: not in the usage text,
-/// because it is the app talking to itself.
-const LIST_PANE_FLAG: &str = "--list-pane";
 
 /// What the app was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
     /// Start a session on a worktree of its own.
     Spawn(Request),
-    /// Draw the list pane, and nothing else.
-    ListPane(View),
     /// Say how to use the app.
     Help,
 }
@@ -43,9 +35,6 @@ pub struct Request {
 /// Work out what the arguments asked for.
 pub fn parse(arguments: Vec<String>) -> Result<Invocation> {
     let given: Vec<String> = arguments.into_iter().skip(1).collect();
-    if given.first().is_some_and(|first| first == LIST_PANE_FLAG) {
-        return list_pane(&given[1..]);
-    }
 
     let mut positional: Vec<String> = Vec::new();
     let mut model: Option<String> = None;
@@ -99,6 +88,9 @@ pub fn usage() -> String {
     format!(
         "harness-launcher — start a coding session on a worktree of its own\n\
          \n\
+         run it from inside tmux: it composes a window around the session, and\n\
+         has to be a pane in that window itself.\n\
+         \n\
          usage:\n    \
              harness-launcher <repository> <work> [--model <id>] [--level <id>]\n\
          \n    \
@@ -117,41 +109,6 @@ pub fn usage() -> String {
 /// What a choice looks like in the usage text.
 fn offer(choices: &[Choice], default: Choice) -> String {
     format!("{}; default {}", listed(choices), default.id)
-}
-
-/// How the app starts itself again as the list pane of a window it just built.
-pub fn list_pane_command(view: &View) -> Result<Vec<String>> {
-    let executable = env::current_exe()
-        .map_err(|error| Error::new(format!("could not find the app's own binary: {error}")))?;
-    let executable = executable
-        .to_str()
-        .ok_or_else(|| Error::new("the app's own path is not valid UTF-8"))?;
-
-    Ok(vec![
-        executable.to_string(),
-        LIST_PANE_FLAG.to_string(),
-        view.repository.clone(),
-        view.spawn.clone(),
-        view.branch.clone(),
-        view.worktree.clone(),
-    ])
-}
-
-/// The list pane mode's arguments, which the app wrote itself.
-fn list_pane(arguments: &[String]) -> Result<Invocation> {
-    match arguments {
-        [repository, spawn, branch, worktree] => Ok(Invocation::ListPane(View {
-            repository: repository.clone(),
-            spawn: spawn.clone(),
-            branch: branch.clone(),
-            worktree: worktree.clone(),
-        })),
-        wrong => Err(Error::new(format!(
-            "{LIST_PANE_FLAG} takes a repository, a spawn, a branch and a worktree, \
-             but got {} arguments",
-            wrong.len()
-        ))),
-    }
 }
 
 /// Read the value of an option, or say which option was left dangling.
@@ -208,7 +165,7 @@ mod tests {
     fn spawn(arguments: &[&str]) -> Request {
         match parse_arguments(arguments).unwrap() {
             Invocation::Spawn(request) => request,
-            other => panic!("expected a spawn, got {other:?}"),
+            Invocation::Help => panic!("expected a spawn, got a request for the usage text"),
         }
     }
 
@@ -296,18 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_pane_reads_back_what_the_app_wrote() {
-        let view = View {
-            repository: "project".to_string(),
-            spawn: "add-retry-logic-a7f3".to_string(),
-            branch: "spawn/add-retry-logic-a7f3".to_string(),
-            worktree: "/data/worktrees/add-retry-logic-a7f3".to_string(),
-        };
-        let command = list_pane_command(&view).unwrap();
-
-        let arguments: Vec<String> = std::iter::once("harness-launcher".to_string())
-            .chain(command.into_iter().skip(1))
-            .collect();
-        assert_eq!(parse(arguments).unwrap(), Invocation::ListPane(view));
+    fn the_usage_text_says_where_the_app_has_to_run() {
+        assert!(usage().contains("tmux"), "{}", usage());
     }
 }
