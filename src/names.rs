@@ -9,6 +9,7 @@
 //! app does not keep. It also means a path is never reused, so worktree metadata
 //! stranded by a crash never blocks anything.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How much of the work description a name keeps.
@@ -30,8 +31,26 @@ pub fn branch_name(spawn_name: &str) -> String {
     format!("spawn/{spawn_name}")
 }
 
-/// A seed for [`spawn_name`], from the only two things to hand that differ
-/// between two spawns started at once: the clock, and which process is asking.
+/// How many seeds this process has already handed out.
+///
+/// The clock and the process id are the same for two spawns started in the same
+/// breath — and one process now starts several at once, one straight after the
+/// other. Two spawns with the same name are two spawns wanting the same
+/// worktree path, which `git worktree add` would refuse: a refusal rather than
+/// damage, but a refusal for a reason nobody could act on. **The count is what
+/// differs between two spawns a clock too coarse to tell them apart would have
+/// named the same**, and it costs an atomic add.
+///
+/// It makes seeds distinct, not names: the suffix is four characters of a
+/// scrambled seed, so two distinct seeds can still land on the same name about
+/// once in 1.7 million. That is the collision the design already accepts — what
+/// this rules out is the *systematic* one, where a coarse clock names every
+/// spawn in a batch identically.
+static HANDED_OUT: AtomicU64 = AtomicU64::new(0);
+
+/// A seed for [`spawn_name`], from the three things to hand that differ between
+/// two spawns: the clock, which process is asking, and how many it has asked
+/// for already.
 ///
 /// The clock is taken as its two halves rather than as a count of nanoseconds,
 /// which would be a `u128` and would have to be cut down to fit. Seconds and
@@ -43,7 +62,7 @@ pub fn fresh_seed() -> u64 {
         .unwrap_or(Duration::ZERO);
     let clock = (u64::from(since_epoch.subsec_nanos()) << 32) ^ since_epoch.as_secs();
 
-    clock ^ u64::from(std::process::id())
+    clock ^ u64::from(std::process::id()) ^ HANDED_OUT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The readable half of a name: the work description, as far as it fits.
@@ -158,6 +177,14 @@ mod tests {
             "1000 seeds produced only {} distinct names",
             names.len()
         );
+    }
+
+    /// Several spawns are started one straight after the other, and a clock
+    /// coarse enough to read the same twice would otherwise name them the same
+    /// — which is two spawns asking for one worktree path.
+    #[test]
+    fn two_spawns_started_in_the_same_breath_are_seeded_differently() {
+        assert_ne!(fresh_seed(), fresh_seed());
     }
 
     #[test]

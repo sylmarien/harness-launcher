@@ -11,13 +11,18 @@
 //! user typed** — it has no keyboard of its own beyond the three keys that leave
 //! and move the selection.
 //!
+//! **Exactly one spawn is in the slot, and moving the selection changes which.**
+//! That is the whole of switching: nothing is moved, resized or told anything,
+//! because every spawn's grid was already current — the one that was off screen
+//! was being drawn into all along, and the one arriving has nothing to catch up
+//! on. **Nothing hides the list**, in this or any other state of the app.
+//!
 //! Nothing here is a fixed size. Every dimension comes from the real terminal on
 //! every frame, so a maximised window is a bigger layout rather than a bigger
 //! frame around a small one — and the slot growing is what tells tmux to grow
 //! the panes behind it.
 
 use std::io;
-use std::slice::from_ref;
 use std::sync::MutexGuard;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -76,8 +81,8 @@ impl Spawn {
     /// Its screen, for as long as the caller holds this.
     ///
     /// Held for a copy and no longer: the reader thread is waiting on the same
-    /// lock with the next thing the spawn drew, so anything done under it is
-    /// done to every spawn at once.
+    /// lock with the next thing this spawn drew, and everything it draws while
+    /// the lock is held is waiting behind it.
     fn screen(&self) -> MutexGuard<'_, Screen> {
         self.grid.lock().expect(POISONED)
     }
@@ -96,6 +101,80 @@ impl Spawn {
     fn modes(&self) -> Modes {
         Modes {
             application_cursor: self.screen().application_cursor(),
+        }
+    }
+}
+
+/// Every spawn there is, and the one the slot is showing.
+///
+/// **Switching is a re-render and nothing else.** There is no parking, no
+/// holding session and no pane being moved: a spawn that is not in the slot is
+/// running in its own window with its own grid, and the control-mode client
+/// fills every grid whether or not the app is drawing it. Selecting another
+/// spawn therefore shows something already current, and the one that just left
+/// carries on exactly as it was — nothing was told anything, so nothing
+/// redraws.
+pub struct Spawns {
+    /// In the order they were started, which is the order the list groups them
+    /// from.
+    all: Vec<Spawn>,
+}
+
+impl Spawns {
+    /// The spawns the app is to show. There has to be at least one.
+    ///
+    /// Not a state the app can reach today — the command line refuses to ask
+    /// for nothing — but the slot is not designed to be empty, and an app
+    /// drawing a screen with no session on it is not something to work out on
+    /// the way past.
+    pub fn new(all: Vec<Spawn>) -> Result<Self> {
+        if all.is_empty() {
+            return Err(Error::new("there is no spawn to show"));
+        }
+
+        Ok(Self { all })
+    }
+
+    /// What the list says about all of them.
+    ///
+    /// Taken once rather than every frame: what the list says about a spawn is
+    /// settled when it is created, and it is the snapshot beside it that
+    /// changes.
+    pub fn entries(&self) -> Vec<Entry> {
+        self.all.iter().map(|spawn| spawn.entry.clone()).collect()
+    }
+
+    /// The spawn in the slot.
+    ///
+    /// A cursor on nothing — or on a spawn that is not here — shows the first
+    /// that was started, because the slot is never empty while there is
+    /// something to put in it. Nothing the app does reaches that fallback: the
+    /// selection starts on a spawn and every move lands on another, so this is
+    /// what the type needs rather than a case with behaviour to defend.
+    fn showing(&self, cursor: &Cursor) -> &Spawn {
+        cursor
+            .spawn()
+            .and_then(|on| self.all.iter().find(|spawn| spawn.entry.spawn == on))
+            .unwrap_or(&self.all[0])
+    }
+
+    /// The shape their screens are in.
+    ///
+    /// One answer for all of them: they are created at the slot's size and
+    /// resized together, so a spawn whose grid was a different shape from its
+    /// neighbours' would be a bug rather than a case to handle.
+    fn shape(&self) -> Size {
+        self.all[0].size()
+    }
+
+    /// Catch every spawn up with the shape the slot has become.
+    ///
+    /// Every one, not only the one on screen: a resize reaches the whole
+    /// session at once, so a spawn left in the old shape would be drawing into
+    /// a grid that clips it long before anybody selected it and noticed.
+    fn resize(&self, slot: Size) {
+        for spawn in &self.all {
+            spawn.resize(slot);
         }
     }
 }
@@ -134,11 +213,11 @@ pub fn slot_now() -> Result<Size> {
 ///
 /// Snapshots are drained rather than queued: what the user wants to see is what
 /// is true now, so a frame that arrives behind several ticks skips them.
-pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Result<()> {
+pub fn run(spawns: &Spawns, snapshots: &Receiver<Snapshot>, client: &Client) -> Result<()> {
     let mut latest = Snapshot::default();
-    let mut showing = spawn.size();
-    let entries = from_ref(&spawn.entry);
-    let mut cursor = Cursor::on(&spawn.entry.spawn);
+    let mut shape = spawns.shape();
+    let entries = spawns.entries();
+    let mut cursor = Cursor::on(&entries[0].spawn);
 
     ratatui::run(|terminal| -> io::Result<()> {
         loop {
@@ -146,7 +225,14 @@ pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Re
                 latest = snapshot;
             }
 
-            terminal.draw(|frame| render(frame, entries, &latest, &cursor, &spawn.screen()))?;
+            // Which spawn is in the slot is settled once, at the top of the
+            // frame. The screen drawn, the modes the keyboard is read in and
+            // the pane a keystroke is addressed to are then the same spawn by
+            // construction — asking again further down would let a selection
+            // that moved mid-frame send what was typed to the spawn that left.
+            let showing = spawns.showing(&cursor);
+
+            terminal.draw(|frame| render(frame, &entries, &latest, &cursor, &showing.screen()))?;
 
             // A client that has gone leaves every grid exactly as it was, which
             // on screen is a session sitting there thinking. Asked here rather
@@ -158,20 +244,22 @@ pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Re
             // than worked out again from the terminal, so what the child is told
             // it has and what the app draws cannot come to differ.
             let wanted = slot(Size::of(terminal.get_frame().area()));
-            if wanted != showing && !wanted.is_empty() {
-                // The grid first: the resize reaches the child as a redraw, and
-                // a grid still the old shape would clip it.
-                spawn.resize(wanted);
+            if wanted != shape && !wanted.is_empty() {
+                // The grids first: the resize reaches the children as a redraw,
+                // and a grid still the old shape would clip it.
+                spawns.resize(wanted);
                 client.resize(wanted).map_err(io::Error::other)?;
-                showing = wanted;
+                shape = wanted;
             }
 
-            match asked_for(spawn.modes())? {
+            match asked_for(showing.modes())? {
                 Asked::Nothing => {}
                 Asked::Quit => return Ok(()),
-                Asked::Moved(step) => cursor.moved(&list::order(entries, &latest), step),
+                Asked::Moved(step) => cursor.moved(&list::order(&entries, &latest), step),
                 Asked::Typed(bytes) => {
-                    client.send(&spawn.pane, &bytes).map_err(io::Error::other)?;
+                    client
+                        .send(&showing.pane, &bytes)
+                        .map_err(io::Error::other)?;
                 }
             }
         }
@@ -268,18 +356,26 @@ pub fn render(
 mod tests {
     use super::*;
     use crate::snapshot::{Row, Status};
+    use std::sync::{Arc, Mutex};
+
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-    /// The one spawn the app has so far, and what the list says about it.
+    /// What the list says about one spawn.
+    fn entry(repository: &str, spawn: &str) -> Entry {
+        Entry {
+            repository: repository.to_string(),
+            spawn: spawn.to_string(),
+            branch: format!("spawn/{spawn}"),
+            worktree: format!("/data/harness-launcher/worktrees/{spawn}"),
+        }
+    }
+
+    /// One spawn, for the tests that draw a list rather than switch between
+    /// what is in the slot.
     fn entries() -> Vec<Entry> {
-        vec![Entry {
-            repository: "harness-launcher".to_string(),
-            spawn: "add-retry-logic-a7f3".to_string(),
-            branch: "spawn/add-retry-logic-a7f3".to_string(),
-            worktree: "/data/harness-launcher/worktrees/add-retry-logic-a7f3".to_string(),
-        }]
+        vec![entry("harness-launcher", "add-retry-logic-a7f3")]
     }
 
     /// What the supervisor would have said about the one spawn there is.
@@ -314,11 +410,23 @@ mod tests {
         let entries = entries();
         let cursor = Cursor::on(&entries[0].spawn);
 
+        painted(width, height, &entries, snapshot, &cursor, &screen)
+    }
+
+    /// One frame, as the text it puts on the terminal.
+    fn painted(
+        width: u16,
+        height: u16,
+        entries: &[Entry],
+        snapshot: &Snapshot,
+        cursor: &Cursor,
+        screen: &Screen,
+    ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| render(frame, &entries, snapshot, &cursor, &screen))
+            .draw(|frame| render(frame, entries, snapshot, cursor, screen))
             .unwrap();
-        let buffer = terminal.backend().buffer().clone();
+        let buffer = terminal.backend().buffer();
 
         (0..buffer.area.height)
             .map(|row| {
@@ -649,5 +757,237 @@ mod tests {
         );
 
         assert!(matches!(read_as(released), Asked::Nothing));
+    }
+
+    // More than one spawn, and which of them the slot is showing.
+
+    /// The terminal these tests draw on, and the shape a grid is therefore in.
+    const TERMINAL: Size = Size {
+        columns: 90,
+        rows: 14,
+    };
+
+    /// A spawn the app could be holding: its own name, its own pane, its own
+    /// screen with something only it would have drawn on it.
+    fn spawn_of(repository: &str, name: &str, pane: &str, said: &str) -> Spawn {
+        Spawn {
+            entry: entry(repository, name),
+            pane: pane.to_string(),
+            grid: Arc::new(Mutex::new(drew(slot(TERMINAL), said))),
+        }
+    }
+
+    /// Three spawns across two repositories, each having drawn its own name.
+    fn several() -> Spawns {
+        Spawns::new(vec![
+            spawn_of(
+                "harness-launcher",
+                "add-retry-logic-a7f3",
+                "%1",
+                "the first spawn is talking",
+            ),
+            spawn_of(
+                "some-other-project",
+                "fix-the-flake-b2c9",
+                "%2",
+                "the second spawn is talking",
+            ),
+            spawn_of(
+                "harness-launcher",
+                "drop-the-cache-d4e1",
+                "%3",
+                "the third spawn is talking",
+            ),
+        ])
+        .unwrap()
+    }
+
+    /// The whole screen, with the list on the named spawn.
+    fn with_the_list_on(spawns: &Spawns, on: &str) -> String {
+        showing(spawns, &Cursor::on(on))
+    }
+
+    /// The whole screen, as this cursor leaves it.
+    fn showing(spawns: &Spawns, cursor: &Cursor) -> String {
+        painted(
+            TERMINAL.columns,
+            TERMINAL.rows,
+            &spawns.entries(),
+            &Snapshot::default(),
+            cursor,
+            &spawns.showing(cursor).screen(),
+        )
+    }
+
+    #[test]
+    fn the_slot_shows_the_spawn_the_list_is_on() {
+        let spawns = several();
+
+        let second = with_the_list_on(&spawns, "fix-the-flake-b2c9");
+
+        assert!(second.contains("the second spawn is talking"), "{second}");
+        assert!(!second.contains("the first spawn is talking"), "{second}");
+        assert!(!second.contains("the third spawn is talking"), "{second}");
+    }
+
+    #[test]
+    fn moving_the_selection_is_the_whole_of_switching() {
+        let spawns = several();
+
+        let screens: Vec<String> = [
+            "add-retry-logic-a7f3",
+            "fix-the-flake-b2c9",
+            "drop-the-cache-d4e1",
+        ]
+        .iter()
+        .map(|on| with_the_list_on(&spawns, on))
+        .collect();
+
+        for (which, said) in ["first", "second", "third"].iter().enumerate() {
+            assert!(
+                screens[which].contains(&format!("the {said} spawn is talking")),
+                "the {said} spawn is not in the slot when the list is on it:\n{}",
+                screens[which]
+            );
+        }
+    }
+
+    /// The differentiator, stated as a test: **no state of the app hides the
+    /// list.** Whichever spawn is in the slot, every other spawn is still named
+    /// beside it, under the repository it was started against.
+    #[test]
+    fn nothing_that_can_be_in_the_slot_takes_the_list_off_the_screen() {
+        let spawns = several();
+
+        for on in [
+            "add-retry-logic-a7f3",
+            "fix-the-flake-b2c9",
+            "drop-the-cache-d4e1",
+        ] {
+            let screen = with_the_list_on(&spawns, on);
+
+            for named in [
+                "add-retry-logic-a7f3",
+                "fix-the-flake-b2c9",
+                "drop-the-cache-d4e1",
+                "harness-launcher",
+                "some-other-project",
+            ] {
+                assert!(
+                    screen.contains(named),
+                    "with the list on {on}, {named} is not on screen:\n{screen}"
+                );
+            }
+        }
+    }
+
+    /// What makes switching free, and what it costs nothing to prove: the
+    /// spawn nobody is looking at is being drawn into all along, so when it is
+    /// selected there is nothing to catch up on.
+    #[test]
+    fn a_spawn_the_slot_is_not_showing_is_still_being_drawn_into() {
+        let spawns = several();
+        let off_screen = &spawns.all[1];
+
+        let looking_elsewhere = with_the_list_on(&spawns, "add-retry-logic-a7f3");
+        off_screen
+            .screen()
+            .apply(b"\r\nand it kept going while you were away");
+        let arriving = with_the_list_on(&spawns, "fix-the-flake-b2c9");
+
+        assert!(
+            !looking_elsewhere.contains("kept going"),
+            "the wrong spawn was in the slot:\n{looking_elsewhere}"
+        );
+        assert!(
+            arriving.contains("and it kept going while you were away"),
+            "what the spawn drew off screen did not arrive with it:\n{arriving}"
+        );
+    }
+
+    /// The path a keystroke really takes, with nothing between the pieces
+    /// stubbed: what `Asked::Moved` runs is `Cursor::moved` over
+    /// [`list::order`], and what the slot then holds is `Spawns::showing` of
+    /// that cursor. Ordering the walk by the list's own order is the point —
+    /// the row the eye moves to and the screen that arrives have to be the
+    /// same spawn.
+    #[test]
+    fn moving_the_selection_walks_the_slot_down_the_list_and_stops_at_the_end() {
+        let spawns = several();
+        let entries = spawns.entries();
+        let latest = Snapshot::default();
+        let order = list::order(&entries, &latest);
+        let mut cursor = Cursor::default();
+
+        // One step from nowhere lands on the first row, whichever spawn the
+        // attention-first order put there.
+        let mut visited = Vec::new();
+        for _ in 0..=order.len() {
+            cursor.moved(&order, Step::Down);
+            visited.push(spawns.showing(&cursor).entry.spawn.clone());
+        }
+
+        assert_eq!(
+            visited[..order.len()],
+            order
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>()[..],
+            "the slot did not follow the order the list draws"
+        );
+        assert_eq!(
+            visited.last(),
+            visited.get(order.len() - 1),
+            "the selection ran off the bottom of the list"
+        );
+    }
+
+    #[test]
+    fn what_is_typed_goes_to_the_spawn_in_the_slot() {
+        let spawns = several();
+
+        assert_eq!(spawns.showing(&Cursor::on("fix-the-flake-b2c9")).pane, "%2");
+        assert_eq!(
+            spawns.showing(&Cursor::on("drop-the-cache-d4e1")).pane,
+            "%3"
+        );
+    }
+
+    #[test]
+    fn a_selection_on_nothing_yet_still_leaves_something_in_the_slot() {
+        let spawns = several();
+
+        let screen = showing(&spawns, &Cursor::default());
+
+        assert!(screen.contains("the first spawn is talking"), "{screen}");
+    }
+
+    /// A resize is one event about the app's window, not about any one spawn,
+    /// so it reaches every spawn — including the ones that will not be drawn
+    /// until somebody selects them.
+    #[test]
+    fn the_slot_changing_shape_reaches_every_spawn_and_not_just_the_one_on_screen() {
+        let spawns = several();
+        let bigger = Size {
+            columns: 120,
+            rows: 40,
+        };
+
+        spawns.resize(bigger);
+
+        for spawn in &spawns.all {
+            assert_eq!(
+                spawn.size(),
+                bigger,
+                "{} was left in the old shape",
+                spawn.entry.spawn
+            );
+        }
+        assert_eq!(spawns.shape(), bigger);
+    }
+
+    #[test]
+    fn the_app_will_not_run_with_nothing_to_put_in_the_slot() {
+        assert!(Spawns::new(Vec::new()).is_err());
     }
 }
