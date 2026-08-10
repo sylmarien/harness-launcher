@@ -2,6 +2,7 @@
 name = "harness-launcher"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 # Clippy's warn-by-default groups are not the whole of it. `pedantic` is the one
 # worth adding here: it is opinionated rather than unstable, and most of what it
