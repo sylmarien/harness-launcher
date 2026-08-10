@@ -93,3 +93,7 @@ recording says how it was made.
 The tmux and control-mode tests drive a **real** tmux on a socket of their own,
 and a real pty. There is no fake and no abstraction over either: what they cover
 is exactly the part a fake would have to pretend about.
+
+## License
+
+[MIT](LICENSE) — do what you like with it, keep the copyright notice.
