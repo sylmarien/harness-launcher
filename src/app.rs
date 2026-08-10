@@ -8,8 +8,13 @@
 //! What is in the slot is a spawn's own screen: a grid the control-mode client
 //! keeps current whether or not it is the one being shown, copied here cell by
 //! cell. Keystrokes go the other way. **The app types into a spawn only what the
-//! user typed** — it has no keyboard of its own beyond the three keys that leave
-//! and move the selection.
+//! user typed** — it has no keyboard of its own beyond the four keys that leave,
+//! move the selection and start a draft.
+//!
+//! **Or the slot holds a draft**, which is a form the app draws and types into
+//! itself. That is the one place an ordinary key means something to the app
+//! rather than to a session, and which of the two it is comes from what the list
+//! is on — settled once a frame, like everything else about the slot.
 //!
 //! **Exactly one spawn is in the slot, and moving the selection changes which.**
 //! That is the whole of switching: nothing is moved, resized or told anything,
@@ -34,6 +39,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Block, Borders};
 
 use crate::control::{Client, Grid, POISONED};
+use crate::draft::{Draft, Drafts, Edit};
 use crate::error::{Error, Result};
 use crate::keys::{self, Modes};
 use crate::list::{self, Cursor, Entry, Listing, Step};
@@ -66,6 +72,13 @@ const QUIT: event::KeyCode = event::KeyCode::F(10);
 const UP: event::KeyCode = event::KeyCode::F(6);
 /// Take it one row down.
 const DOWN: event::KeyCode = event::KeyCode::F(7);
+/// Start a draft, and put the selection on it.
+///
+/// A fourth function key, and it has to be one: composing is reached from a
+/// spawn in the slot, where every ordinary key is that session's. It sits well
+/// away from the two that move, because starting a draft by mistyping a
+/// selection is a row appearing in the list nobody asked for.
+const COMPOSE: event::KeyCode = event::KeyCode::F(2);
 
 /// A spawn, as the screen needs it: what to say about it, and what it drew.
 pub struct Spawn {
@@ -213,11 +226,16 @@ pub fn slot_now() -> Result<Size> {
 ///
 /// Snapshots are drained rather than queued: what the user wants to see is what
 /// is true now, so a frame that arrives behind several ticks skips them.
-pub fn run(spawns: &Spawns, snapshots: &Receiver<Snapshot>, client: &Client) -> Result<()> {
+pub fn run(
+    spawns: &Spawns,
+    drafts: &mut Drafts,
+    snapshots: &Receiver<Snapshot>,
+    client: &Client,
+) -> Result<()> {
     let mut latest = Snapshot::default();
     let mut shape = spawns.shape();
     let entries = spawns.entries();
-    let mut cursor = Cursor::on(&entries[0].spawn);
+    let mut cursor = Cursor::on_spawn(&entries[0].spawn);
 
     ratatui::run(|terminal| -> io::Result<()> {
         loop {
@@ -225,14 +243,22 @@ pub fn run(spawns: &Spawns, snapshots: &Receiver<Snapshot>, client: &Client) -> 
                 latest = snapshot;
             }
 
-            // Which spawn is in the slot is settled once, at the top of the
-            // frame. The screen drawn, the modes the keyboard is read in and
-            // the pane a keystroke is addressed to are then the same spawn by
-            // construction — asking again further down would let a selection
-            // that moved mid-frame send what was typed to the spawn that left.
-            let showing = spawns.showing(&cursor);
+            // What is in the slot is settled once, at the top of the frame. The
+            // screen drawn, the way the keyboard is read and the pane a
+            // keystroke is addressed to are then the same spawn — or the same
+            // draft — by construction; asking again further down would let a
+            // selection that moved mid-frame send what was typed to the spawn
+            // that left.
+            let showing = in_the_slot(spawns, drafts, &cursor);
+            let typing = showing.typing();
+            // The pane's name rather than the pane, so that what is in the slot
+            // is done being borrowed by the time an edit needs the drafts back.
+            // A frame's worth of one short string, against a keystroke reaching
+            // the wrong spawn.
+            let addressed = showing.pane().map(str::to_string);
+            let listing = Listing::new(drafts.all(), &entries, &latest, &cursor);
 
-            terminal.draw(|frame| render(frame, &entries, &latest, &cursor, &showing.screen()))?;
+            terminal.draw(|frame| render(frame, listing, &showing))?;
 
             // A client that has gone leaves every grid exactly as it was, which
             // on screen is a session sitting there thinking. Asked here rather
@@ -252,19 +278,75 @@ pub fn run(spawns: &Spawns, snapshots: &Receiver<Snapshot>, client: &Client) -> 
                 shape = wanted;
             }
 
-            match asked_for(showing.modes())? {
+            match asked_for(typing)? {
                 Asked::Nothing => {}
                 Asked::Quit => return Ok(()),
-                Asked::Moved(step) => cursor.moved(&list::order(&entries, &latest), step),
+                Asked::Moved(step) => {
+                    cursor.moved(&list::order(drafts.all(), &entries, &latest), step);
+                }
+                Asked::Composed => cursor = Cursor::on_draft(drafts.start()),
+                Asked::Edited(edit) => {
+                    if let Some(draft) = cursor.draft() {
+                        drafts.edit(draft, edit);
+                    }
+                }
                 Asked::Typed(bytes) => {
-                    client
-                        .send(&showing.pane, &bytes)
-                        .map_err(io::Error::other)?;
+                    if let Some(pane) = &addressed {
+                        client.send(pane, &bytes).map_err(io::Error::other)?;
+                    }
                 }
             }
         }
     })
     .map_err(|error| Error::new(format!("the app stopped: {error}")))
+}
+
+/// What the slot is showing.
+///
+/// A draft when the list is on one, and the selected spawn otherwise. The list
+/// is what settles it, which is what makes composing something you walk into and
+/// out of rather than a mode the app is put into.
+pub enum InTheSlot<'a> {
+    /// A spawn, and the screen it drew.
+    Session(&'a Spawn),
+    /// A draft, and the form it is being written in.
+    Composing(&'a Draft),
+}
+
+impl InTheSlot<'_> {
+    /// How the keyboard is read while this is what the slot holds.
+    fn typing(&self) -> Typing {
+        match self {
+            InTheSlot::Session(spawn) => Typing::IntoTheSpawn(spawn.modes()),
+            InTheSlot::Composing(_) => Typing::IntoTheDraft,
+        }
+    }
+
+    /// The pane a keystroke is addressed to, when there is one. A draft has
+    /// none: it is not a process, and nothing it is typed into leaves the app.
+    fn pane(&self) -> Option<&str> {
+        match self {
+            InTheSlot::Session(spawn) => Some(&spawn.pane),
+            InTheSlot::Composing(_) => None,
+        }
+    }
+}
+
+/// What the slot holds with the list where it is.
+fn in_the_slot<'a>(spawns: &'a Spawns, drafts: &'a Drafts, cursor: &Cursor) -> InTheSlot<'a> {
+    match cursor.draft().and_then(|draft| drafts.of(draft)) {
+        Some(draft) => InTheSlot::Composing(draft),
+        None => InTheSlot::Session(spawns.showing(cursor)),
+    }
+}
+
+/// Where the ordinary keys are going this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typing {
+    /// To the spawn in the slot, in the modes its own screen asked for.
+    IntoTheSpawn(Modes),
+    /// Into the draft in the slot, which never leaves the app.
+    IntoTheDraft,
 }
 
 /// What the user did with the keyboard.
@@ -275,12 +357,16 @@ enum Asked {
     Quit,
     /// To go up or down the list.
     Moved(Step),
+    /// To start a draft.
+    Composed,
+    /// Something for the draft in the slot.
+    Edited(Edit),
     /// Something for the spawn, already in the bytes a terminal would send.
     Typed(Vec<u8>),
 }
 
 /// Wait a frame's worth of time for the keyboard.
-fn asked_for(modes: Modes) -> io::Result<Asked> {
+fn asked_for(typing: Typing) -> io::Result<Asked> {
     if !event::poll(FRAME)? {
         return Ok(Asked::Nothing);
     }
@@ -289,15 +375,16 @@ fn asked_for(modes: Modes) -> io::Result<Asked> {
         return Ok(Asked::Nothing);
     };
 
-    Ok(what_it_means(key, modes))
+    Ok(what_it_means(key, typing))
 }
 
 /// What one keystroke means.
 ///
-/// The whole of the split between the app's keyboard and the spawn's, in one
-/// place and with nothing else in it: everything not named here is on its way to
-/// the session, unchanged.
-fn what_it_means(key: KeyEvent, modes: Modes) -> Asked {
+/// The whole of the split between the app's keyboard and whatever is in the
+/// slot, in one place and with nothing else in it: the four keys named here are
+/// the app's wherever the selection is, and everything else belongs to what the
+/// slot is holding — bytes for a session, an edit for a draft.
+fn what_it_means(key: KeyEvent, typing: Typing) -> Asked {
     // Terminals that report a key going back up send the same key twice, and a
     // spawn would be typed into twice.
     if key.kind != KeyEventKind::Press {
@@ -306,9 +393,47 @@ fn what_it_means(key: KeyEvent, modes: Modes) -> Asked {
 
     match key.code {
         QUIT => Asked::Quit,
+        COMPOSE => Asked::Composed,
         UP => Asked::Moved(Step::Up),
         DOWN => Asked::Moved(Step::Down),
-        _ => Asked::Typed(keys::typed(key, modes)),
+        _ => match typing {
+            Typing::IntoTheSpawn(modes) => Asked::Typed(keys::typed(key, modes)),
+            Typing::IntoTheDraft => edited(key).map_or(Asked::Nothing, Asked::Edited),
+        },
+    }
+}
+
+/// What one keystroke means to a form.
+///
+/// A table of its own rather than a second reading of [`keys::typed`]: a form is
+/// not a terminal, so what it wants is what the key meant rather than the bytes
+/// a terminal would have sent for it. A key with nothing here does nothing — a
+/// draft is text somebody is writing, and the app inventing an edit for a key it
+/// does not know would be the one thing that costs them the paragraph.
+fn edited(key: KeyEvent) -> Option<Edit> {
+    use event::KeyCode;
+
+    if key
+        .modifiers
+        .intersects(event::KeyModifiers::CONTROL | event::KeyModifiers::ALT)
+    {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char(character) => Some(Edit::Typed(character)),
+        KeyCode::Backspace => Some(Edit::Erased),
+        KeyCode::Delete => Some(Edit::Deleted),
+        KeyCode::Left => Some(Edit::Left),
+        KeyCode::Right => Some(Edit::Right),
+        KeyCode::Home => Some(Edit::Start),
+        KeyCode::End => Some(Edit::End),
+        KeyCode::Up => Some(Edit::Up),
+        KeyCode::Down => Some(Edit::Down),
+        KeyCode::Tab => Some(Edit::Next),
+        KeyCode::BackTab => Some(Edit::Previous),
+        KeyCode::Enter => Some(Edit::Entered),
+        _ => None,
     }
 }
 
@@ -328,23 +453,35 @@ fn regions(area: Rect) -> (Rect, Rect, Rect) {
 }
 
 /// Paint one frame.
-pub fn render(
-    frame: &mut Frame,
-    entries: &[Entry],
-    snapshot: &Snapshot,
-    cursor: &Cursor,
-    screen: &Screen,
-) {
+pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
     let (list, separator, slot) = regions(frame.area());
 
-    frame.render_widget(Listing::new(entries, snapshot, cursor), list);
+    frame.render_widget(listing, list);
     frame.render_widget(Block::new().borders(Borders::LEFT), separator);
-    frame.render_widget(screen, slot);
 
-    // The cursor is the terminal's own, put where the spawn left it. Without
-    // this the app would have a screen that looks like a session and no sign of
-    // where what you type is going.
-    if let Some((column, row)) = screen.cursor()
+    // Where the terminal's own cursor goes, asked of whatever drew the slot.
+    // Without it the app would have a screen that looks like a session, or a
+    // form, and no sign of where what you type is going.
+    let caret = match showing {
+        InTheSlot::Session(spawn) => {
+            let screen = spawn.screen();
+            frame.render_widget(&*screen, slot);
+
+            screen.cursor()
+        }
+        InTheSlot::Composing(draft) => {
+            // Laid out once and asked twice: the form is what says where the
+            // caret goes, and working it out a second way would put it a cell
+            // from the character it belongs to.
+            let form = draft.form(Size::of(slot));
+            let caret = form.caret();
+            frame.render_widget(form, slot);
+
+            caret
+        }
+    };
+
+    if let Some((column, row)) = caret
         && column < slot.width
         && row < slot.height
     {
@@ -361,6 +498,9 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use crate::draft::tests::drafting;
+    use crate::list::On;
 
     /// What the list says about one spawn.
     fn entry(repository: &str, spawn: &str) -> Entry {
@@ -406,25 +546,45 @@ mod tests {
             columns: width,
             rows: height,
         };
-        let screen = drew(slot_size(terminal), slot);
         let entries = entries();
-        let cursor = Cursor::on(&entries[0].spawn);
+        let spawn = spawn_of(
+            &entries[0].repository,
+            &entries[0].spawn,
+            "%1",
+            slot_size(terminal),
+            slot,
+        );
+        let cursor = Cursor::on_spawn(&entries[0].spawn);
 
-        painted(width, height, &entries, snapshot, &cursor, &screen)
+        painted(
+            terminal,
+            &[],
+            &entries,
+            snapshot,
+            &cursor,
+            &InTheSlot::Session(&spawn),
+        )
     }
 
     /// One frame, as the text it puts on the terminal.
     fn painted(
-        width: u16,
-        height: u16,
+        terminal: Size,
+        drafts: &[Draft],
         entries: &[Entry],
         snapshot: &Snapshot,
         cursor: &Cursor,
-        screen: &Screen,
+        showing: &InTheSlot,
     ) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut terminal =
+            Terminal::new(TestBackend::new(terminal.columns, terminal.rows)).unwrap();
         terminal
-            .draw(|frame| render(frame, entries, snapshot, cursor, screen))
+            .draw(|frame| {
+                render(
+                    frame,
+                    Listing::new(drafts, entries, snapshot, cursor),
+                    showing,
+                );
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
 
@@ -569,57 +729,54 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_cursor_is_put_where_the_spawn_left_it() {
-        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
-        let size = slot(Size {
-            columns: 90,
-            rows: 12,
-        });
-        let screen = drew(size, "\x1b[3;7H");
-
-        let (_, _, slot) = regions(Rect::new(0, 0, 90, 12));
-        terminal
+    /// Where the terminal's own cursor ended up, or nothing at all when the
+    /// frame left it hidden.
+    fn cursor_after(terminal: Size, showing: &InTheSlot) -> Option<(u16, u16)> {
+        let mut backend = Terminal::new(TestBackend::new(terminal.columns, terminal.rows)).unwrap();
+        backend
             .draw(|frame| {
                 render(
                     frame,
-                    &entries(),
-                    &Snapshot::default(),
-                    &Cursor::default(),
-                    &screen,
+                    Listing::new(&[], &entries(), &Snapshot::default(), &Cursor::default()),
+                    showing,
                 );
             })
             .unwrap();
 
-        assert!(terminal.backend().cursor_visible());
+        let at = backend.backend().cursor_position();
+
+        backend.backend().cursor_visible().then_some((at.x, at.y))
+    }
+
+    #[test]
+    fn the_cursor_is_put_where_the_spawn_left_it() {
+        let spawn = spawn_of(
+            "harness-launcher",
+            "add-retry-logic-a7f3",
+            "%1",
+            slot(TERMINAL),
+            "\x1b[3;7H",
+        );
+
+        let (_, _, slot) = regions(Rect::new(0, 0, TERMINAL.columns, TERMINAL.rows));
+
         assert_eq!(
-            terminal.backend().cursor_position(),
-            (slot.x + 6, slot.y + 2).into()
+            cursor_after(TERMINAL, &InTheSlot::Session(&spawn)),
+            Some((slot.x + 6, slot.y + 2))
         );
     }
 
     #[test]
     fn a_spawn_that_hid_its_cursor_does_not_get_one_drawn_anyway() {
-        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
-        let size = slot(Size {
-            columns: 90,
-            rows: 12,
-        });
-        let screen = drew(size, "\x1b[?25l");
+        let spawn = spawn_of(
+            "harness-launcher",
+            "add-retry-logic-a7f3",
+            "%1",
+            slot(TERMINAL),
+            "\x1b[?25l",
+        );
 
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    &entries(),
-                    &Snapshot::default(),
-                    &Cursor::default(),
-                    &screen,
-                );
-            })
-            .unwrap();
-
-        assert!(!terminal.backend().cursor_visible());
+        assert_eq!(cursor_after(TERMINAL, &InTheSlot::Session(&spawn)), None);
     }
 
     /// The row the spawn is on, whatever else moved around it.
@@ -724,13 +881,13 @@ mod tests {
         );
     }
 
-    /// What the app makes of one key.
+    /// What the app makes of one key, with a spawn in the slot.
     fn read_as(key: KeyEvent) -> Asked {
         what_it_means(
             key,
-            Modes {
+            Typing::IntoTheSpawn(Modes {
                 application_cursor: false,
-            },
+            }),
         )
     }
 
@@ -739,13 +896,56 @@ mod tests {
         read_as(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    /// What it makes of one key with a draft in the slot.
+    fn typed_at_a_draft(code: KeyCode) -> Asked {
+        what_it_means(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            Typing::IntoTheDraft,
+        )
+    }
+
     #[test]
-    fn the_app_keeps_three_keys_and_the_spawn_gets_every_other() {
+    fn the_app_keeps_four_keys_and_the_spawn_gets_every_other() {
         assert!(matches!(pressed(QUIT), Asked::Quit));
+        assert!(matches!(pressed(COMPOSE), Asked::Composed));
         assert!(matches!(pressed(UP), Asked::Moved(Step::Up)));
         assert!(matches!(pressed(DOWN), Asked::Moved(Step::Down)));
         assert!(matches!(pressed(KeyCode::Char('2')), Asked::Typed(bytes) if bytes == b"2"));
         assert!(matches!(pressed(KeyCode::Esc), Asked::Typed(bytes) if bytes == [0x1b]));
+    }
+
+    /// The whole of the difference a draft makes to the keyboard: the app's own
+    /// keys are still the app's, and everything else is an edit rather than
+    /// bytes on their way to a session.
+    #[test]
+    fn a_draft_in_the_slot_takes_the_ordinary_keys_and_leaves_the_apps_alone() {
+        assert!(matches!(typed_at_a_draft(QUIT), Asked::Quit));
+        assert!(matches!(typed_at_a_draft(UP), Asked::Moved(Step::Up)));
+        assert!(matches!(typed_at_a_draft(DOWN), Asked::Moved(Step::Down)));
+        assert!(matches!(
+            typed_at_a_draft(KeyCode::Char('2')),
+            Asked::Edited(Edit::Typed('2'))
+        ));
+        assert!(matches!(
+            typed_at_a_draft(KeyCode::Tab),
+            Asked::Edited(Edit::Next)
+        ));
+        assert!(matches!(
+            typed_at_a_draft(KeyCode::Backspace),
+            Asked::Edited(Edit::Erased)
+        ));
+    }
+
+    #[test]
+    fn a_key_a_form_has_nothing_to_do_with_does_nothing_rather_than_something() {
+        assert!(matches!(typed_at_a_draft(KeyCode::Esc), Asked::Nothing));
+        assert!(matches!(
+            what_it_means(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Typing::IntoTheDraft
+            ),
+            Asked::Nothing
+        ));
     }
 
     #[test]
@@ -769,11 +969,11 @@ mod tests {
 
     /// A spawn the app could be holding: its own name, its own pane, its own
     /// screen with something only it would have drawn on it.
-    fn spawn_of(repository: &str, name: &str, pane: &str, said: &str) -> Spawn {
+    fn spawn_of(repository: &str, name: &str, pane: &str, size: Size, said: &str) -> Spawn {
         Spawn {
             entry: entry(repository, name),
             pane: pane.to_string(),
-            grid: Arc::new(Mutex::new(drew(slot(TERMINAL), said))),
+            grid: Arc::new(Mutex::new(drew(size, said))),
         }
     }
 
@@ -784,18 +984,21 @@ mod tests {
                 "harness-launcher",
                 "add-retry-logic-a7f3",
                 "%1",
+                slot(TERMINAL),
                 "the first spawn is talking",
             ),
             spawn_of(
                 "some-other-project",
                 "fix-the-flake-b2c9",
                 "%2",
+                slot(TERMINAL),
                 "the second spawn is talking",
             ),
             spawn_of(
                 "harness-launcher",
                 "drop-the-cache-d4e1",
                 "%3",
+                slot(TERMINAL),
                 "the third spawn is talking",
             ),
         ])
@@ -804,18 +1007,24 @@ mod tests {
 
     /// The whole screen, with the list on the named spawn.
     fn with_the_list_on(spawns: &Spawns, on: &str) -> String {
-        showing(spawns, &Cursor::on(on))
+        showing(spawns, &Cursor::on_spawn(on))
     }
 
-    /// The whole screen, as this cursor leaves it.
+    /// The whole screen, as this cursor leaves it, with nothing being drafted.
     fn showing(spawns: &Spawns, cursor: &Cursor) -> String {
+        with_drafts(spawns, &Drafts::new(Vec::new()), cursor)
+    }
+
+    /// The whole screen, drafts and all — the slot holding whatever the cursor
+    /// is on, which is the app's own rule about the slot rather than the test's.
+    fn with_drafts(spawns: &Spawns, drafts: &Drafts, cursor: &Cursor) -> String {
         painted(
-            TERMINAL.columns,
-            TERMINAL.rows,
+            TERMINAL,
+            drafts.all(),
             &spawns.entries(),
             &Snapshot::default(),
             cursor,
-            &spawns.showing(cursor).screen(),
+            &in_the_slot(spawns, drafts, cursor),
         )
     }
 
@@ -916,7 +1125,7 @@ mod tests {
         let spawns = several();
         let entries = spawns.entries();
         let latest = Snapshot::default();
-        let order = list::order(&entries, &latest);
+        let order = list::order(&[], &entries, &latest);
         let mut cursor = Cursor::default();
 
         // One step from nowhere lands on the first row, whichever spawn the
@@ -924,15 +1133,12 @@ mod tests {
         let mut visited = Vec::new();
         for _ in 0..=order.len() {
             cursor.moved(&order, Step::Down);
-            visited.push(spawns.showing(&cursor).entry.spawn.clone());
+            visited.push(On::Spawn(spawns.showing(&cursor).entry.spawn.clone()));
         }
 
         assert_eq!(
             visited[..order.len()],
-            order
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect::<Vec<_>>()[..],
+            order[..],
             "the slot did not follow the order the list draws"
         );
         assert_eq!(
@@ -946,9 +1152,14 @@ mod tests {
     fn what_is_typed_goes_to_the_spawn_in_the_slot() {
         let spawns = several();
 
-        assert_eq!(spawns.showing(&Cursor::on("fix-the-flake-b2c9")).pane, "%2");
         assert_eq!(
-            spawns.showing(&Cursor::on("drop-the-cache-d4e1")).pane,
+            spawns.showing(&Cursor::on_spawn("fix-the-flake-b2c9")).pane,
+            "%2"
+        );
+        assert_eq!(
+            spawns
+                .showing(&Cursor::on_spawn("drop-the-cache-d4e1"))
+                .pane,
             "%3"
         );
     }
@@ -989,5 +1200,105 @@ mod tests {
     #[test]
     fn the_app_will_not_run_with_nothing_to_put_in_the_slot() {
         assert!(Spawns::new(Vec::new()).is_err());
+    }
+
+    // Drafts: the other thing the slot can hold.
+
+    #[test]
+    fn starting_a_draft_is_what_puts_it_in_the_slot() {
+        let spawns = several();
+        let mut drafts = Drafts::new(Vec::new());
+
+        let cursor = Cursor::on_draft(drafts.start());
+
+        assert!(matches!(
+            in_the_slot(&spawns, &drafts, &cursor),
+            InTheSlot::Composing(_)
+        ));
+    }
+
+    /// The differentiator again, and this is the state it was most at risk in:
+    /// a form is exactly the thing other tools make modal.
+    #[test]
+    fn a_draft_in_the_slot_is_a_form_and_the_list_is_still_beside_it() {
+        let spawns = several();
+        let drafts = drafting(&["fix the worktree cleanup"]);
+        let on_it = Cursor::on_draft(drafts.all()[0].id());
+
+        let screen = with_drafts(&spawns, &drafts, &on_it);
+
+        assert!(screen.contains("NEW SPAWN"), "{screen}");
+        assert!(screen.contains("Repository"), "{screen}");
+        for named in [
+            "add-retry-logic-a7f3",
+            "fix-the-flake-b2c9",
+            "drop-the-cache-d4e1",
+            "harness-launcher",
+            "some-other-project",
+        ] {
+            assert!(
+                screen.contains(named),
+                "with a draft in the slot, {named} is not on screen:\n{screen}"
+            );
+        }
+    }
+
+    /// What the whole design of a draft is for: leave a half-written paragraph,
+    /// go and deal with a spawn, come back to it exactly as it was.
+    #[test]
+    fn walking_away_from_a_half_written_draft_and_back_leaves_the_text_alone() {
+        let spawns = several();
+        let drafts = drafting(&["half a sentence and"]);
+        let on_it = Cursor::on_draft(drafts.all()[0].id());
+
+        let composing = with_drafts(&spawns, &drafts, &on_it);
+        let away = with_drafts(&spawns, &drafts, &Cursor::on_spawn("fix-the-flake-b2c9"));
+        let back = with_drafts(&spawns, &drafts, &on_it);
+
+        assert!(composing.contains("half a sentence and"), "{composing}");
+        assert!(
+            away.contains("the second spawn is talking"),
+            "the draft did not give the slot back:\n{away}"
+        );
+        assert!(
+            !away.contains("NEW SPAWN"),
+            "the form is still in the slot:\n{away}"
+        );
+        assert_eq!(composing, back, "coming back is not what was left");
+    }
+
+    #[test]
+    fn several_drafts_are_in_flight_at_once_and_each_holds_its_own_text() {
+        let spawns = several();
+        let drafts = drafting(&["the first draft", "the second draft"]);
+
+        let first = with_drafts(&spawns, &drafts, &Cursor::on_draft(drafts.all()[0].id()));
+        let second = with_drafts(&spawns, &drafts, &Cursor::on_draft(drafts.all()[1].id()));
+
+        assert!(first.contains("  the first draft"), "{first}");
+        assert!(!first.contains("  the second draft"), "{first}");
+        assert!(second.contains("  the second draft"), "{second}");
+    }
+
+    #[test]
+    fn the_cursor_is_put_in_the_form_being_typed_into_rather_than_left_on_the_list() {
+        let blank = drafting(&[""]);
+        let six = drafting(&["typing"]);
+        let (_, _, slot) = regions(Rect::new(0, 0, TERMINAL.columns, TERMINAL.rows));
+
+        let empty_at = cursor_after(TERMINAL, &InTheSlot::Composing(&blank.all()[0]))
+            .expect("a caret in the field being typed into");
+        let typed_at = cursor_after(TERMINAL, &InTheSlot::Composing(&six.all()[0]))
+            .expect("a caret in the field being typed into");
+
+        assert!(
+            empty_at.0 >= slot.x,
+            "the caret is on the list rather than in the slot: {empty_at:?}"
+        );
+        assert_eq!(
+            typed_at,
+            (empty_at.0 + 6, empty_at.1),
+            "the caret did not follow the six characters that were typed"
+        );
     }
 }
