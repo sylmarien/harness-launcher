@@ -143,8 +143,9 @@ pub fn usage() -> String {
              --level <id>  {}\n    \
              -h, --help    show this\n\
          \n\
-         everything you type goes to the session in the slot; F6 and F7 move\n\
-         between them, and F10 quits and leaves every one of them running.\n",
+         everything you type goes to whatever is in the slot; F6 and F7 move\n\
+         between them, F2 starts a draft of another session, and F10 quits and\n\
+         leaves every one of them running.\n",
         offer(&harness::models(), harness::default_model()),
         offer(&harness::effort_levels(), harness::default_effort_level()),
     )
@@ -382,9 +383,16 @@ mod tests {
 
     #[test]
     fn the_usage_text_says_how_to_leave() {
-        // The one key the app keeps for itself. Nothing else on the keyboard is
-        // the app's, so nothing else would tell you how to get out.
+        // Few keys are the app's, and every ordinary one belongs to whatever is
+        // in the slot — so nothing on screen would tell you how to get out.
         assert!(usage().contains("F10"), "{}", usage());
+    }
+
+    #[test]
+    fn the_usage_text_says_how_to_start_a_session_from_inside_the_app() {
+        // The command line is not the only way to start one, and it is the only
+        // place somebody who has not run the app yet is reading.
+        assert!(usage().contains("F2"), "{}", usage());
     }
 
     #[test]

@@ -24,10 +24,18 @@
 //! against, attention-first, each repository header carrying a bar of its
 //! spawns' statuses. **Nothing hides it** — that is the point of the whole
 //! layout.
+//!
+//! **Another session is composed in the same place.** `F2` starts a draft: a
+//! row of its own pinned above the repositories, and a form in the slot asking
+//! for a repository, the work, and whatever the harness lets you choose. It is
+//! not a dialog — walk away to a spawn that stopped and come back, and it is
+//! where you left it. Several can be in flight at once. **Nothing is created
+//! from one yet**; that is the next piece of work.
 
 mod app;
 mod cli;
 mod control;
+mod draft;
 mod error;
 mod git;
 mod harness;
@@ -35,6 +43,7 @@ mod keys;
 mod list;
 mod names;
 mod process;
+mod scaffolding;
 mod screen;
 mod snapshot;
 mod supervisor;
@@ -115,8 +124,9 @@ fn spawn(requests: Vec<Request>) -> Result<()> {
     }
 
     let snapshots = supervisor::watch(tmux, watched);
+    let mut drafts = draft::Drafts::new(harness::choices());
 
-    app::run(&app::Spawns::new(spawns)?, &snapshots, &client)
+    app::run(&app::Spawns::new(spawns)?, &mut drafts, &snapshots, &client)
 }
 
 /// One spawn, worked out but not yet made.

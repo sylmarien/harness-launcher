@@ -35,6 +35,47 @@ pub struct Choice {
     pub label: &'static str,
 }
 
+/// One list of options the harness offers, as the spawn form will show it.
+///
+/// The form draws a title and some labels and can say which one is picked. It
+/// is told nothing else — not that one of these lists is about models, not what
+/// any id means, not that the harness has exactly two of them. That is what
+/// keeps the form a form: the question it asks is always *"which of these?"*,
+/// and every answer to it comes from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choices {
+    /// What the form calls the list.
+    pub title: &'static str,
+    /// What can be picked, in the order the harness wants them read.
+    pub options: Vec<Choice>,
+    /// What is picked before the user picks anything.
+    pub default: Choice,
+}
+
+/// Everything the harness lets you choose when starting a session.
+///
+/// In the order the form asks: what runs the work, then how much of itself it
+/// spends on it.
+///
+/// A harness with nothing to offer under one of these headings returns an empty
+/// list rather than a placeholder, and the form omits that control entirely —
+/// which is why this returns the lists as they are rather than promising each
+/// of them has something in it.
+pub fn choices() -> Vec<Choices> {
+    vec![
+        Choices {
+            title: "Model",
+            options: models(),
+            default: default_model(),
+        },
+        Choices {
+            title: "Effort",
+            options: effort_levels(),
+            default: default_effort_level(),
+        },
+    ]
+}
+
 /// Everything the user chose, plus where the app put the worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
@@ -398,6 +439,28 @@ mod tests {
     fn the_defaults_are_choices_the_harness_actually_offers() {
         assert!(models().contains(&default_model()));
         assert!(effort_levels().contains(&default_effort_level()));
+    }
+
+    #[test]
+    fn every_list_the_form_is_offered_has_a_title_and_a_default_it_contains() {
+        for choices in choices() {
+            assert!(!choices.title.is_empty());
+            assert!(
+                choices.options.contains(&choices.default),
+                "{} defaults to something it does not offer",
+                choices.title
+            );
+        }
+    }
+
+    #[test]
+    fn the_form_is_offered_the_choices_the_command_line_takes() {
+        let offered: Vec<Vec<Choice>> = choices()
+            .into_iter()
+            .map(|choices| choices.options)
+            .collect();
+
+        assert_eq!(offered, [models(), effort_levels()]);
     }
 
     #[test]
