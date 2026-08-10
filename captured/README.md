@@ -1,10 +1,10 @@
 # Captured output
 
-The status ladder is built on what three other programs print — tmux, `ps` and
-the harness. Its tests read the recordings here rather than strings written from
-memory, because a format remembered wrongly makes a parser that passes its tests
-and fails in front of a user, and none of these three formats is one this project
-controls.
+The app reads what other programs print — tmux, `ps`, the harness, and now
+whatever a spawn draws. The tests read the recordings here rather than strings
+written from memory, because a format remembered wrongly makes a parser that
+passes its tests and fails in front of a user, and not one of these formats is
+one this project controls.
 
 Each file says how it was made, so it can be made again on a machine where the
 answer might differ.
@@ -29,6 +29,53 @@ its `pane_tty` is `/dev/pts/3` — **the same terminal `%3` now holds**, because
 dead pane's terminal is released and handed to the next pane that asks. Nothing
 may probe a dead pane by its terminal; the ladder never does, because death
 resolves before any probe is considered.
+
+## `tmux-control-mode.txt`
+
+**tmux 3.4** and **vim 9.1**, Linux. The `%output` notifications a control-mode
+client received while a real program drew a real screen — which is the whole of
+what the app's own terminal emulation is fed:
+
+```
+tmux -L rec new-session -d -s spawns -x 20 -y 5 -- sh -c 'while :; do sleep 3600; done'
+tmux -L rec set-option -g -w remain-on-exit on
+script -q -f -c "tmux -L rec -CC attach -t spawns" raw.txt &   # a control client needs a tty
+printf 'refresh-client -C 60x16\n' > <the client's input>
+P=$(tmux -L rec new-window -d -t spawns -n s1 -P -F '#{pane_id}' -- sh -c 'while :; do sleep 3600; done')
+tmux -L rec respawn-pane -k -t $P -e TERM=xterm-256color -- vim -u NONE -N --cmd 'set encoding=utf-8' note.txt
+grep '^%output' raw.txt > tmux-control-mode.txt
+```
+
+`note.txt` is three lines of box drawing with `世界` inside it, so the recording
+carries the two things a hand-written string would get wrong: **wide characters**
+that must take two cells and push nothing along, and **box drawing** that must
+line up column for column afterwards.
+
+Four things this pins down that no remembered format would.
+
+**The escaping.** Anything a line protocol could not survive arrives as three
+octal digits behind a backslash — `\033`, `\015\012` — **and so does the
+backslash itself**, as `\134`. That last one is what makes it unambiguous.
+Everything else, UTF-8 included, is passed through as raw bytes: read the file
+with `od -c` and the box-drawing characters are there untouched.
+
+**Where the chunks fall.** One line per read from the pane, wherever that landed
+— so `%output` boundaries fall in arbitrary places, and half a wide character at
+the end of a line is ordinary. Escaping happens *after* chunking, so an escape is
+never split; a UTF-8 sequence is, which is why the app reads this as bytes.
+
+**The line terminator is `\r\n`.** The client writes into a terminal, and a
+terminal turns every newline into both. Left on, that carriage return reaches the
+emulator as something the spawn drew.
+
+**A real terminal query, unanswered here.** Line 3 contains `\033[6n` — vim
+asking where the cursor is. The app never answers it, and does not need to: the
+pane's terminal is tmux, which replies before passing the bytes on. There is an
+integration test for that in `src/control.rs`, because it is the one thing in the
+design named as its sharpest risk.
+
+The recording stops mid-life, as a spawn's output always does — the last
+`%output` is a full redraw and the file simply ends.
 
 ## `ps-foreground.txt`
 

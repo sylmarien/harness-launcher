@@ -1,29 +1,33 @@
 //! Start a coding session on a worktree of its own, beside a list of the others.
 //!
-//! One window: the app's list pane on the left, the slot on the right. The slot
-//! holds a real session — the actual program, in a real pane, which you type
-//! into as if you had started it yourself. **The app never types into it.**
+//! One screen, drawn end to end by the app: the list on the left, the slot on
+//! the right. The slot holds a real session — the actual program, which you type
+//! into as if you had started it yourself. **The app never types into it
+//! anything but what you typed.**
 //!
-//! **The app runs inside tmux, and refuses to run anywhere else.** It composes
-//! a window around the session it starts, and to do that it has to already be a
-//! pane in that window — which, started from a bare shell, it is not. It could
-//! build a window and start itself again inside it, and did; that meant a
-//! second process learning the slot's pane id across a boundary, for a case the
-//! user can settle by typing `tmux` first.
+//! **It is an ordinary terminal program.** Run it from a shell, from inside tmux,
+//! from anywhere; it makes no difference to anything. tmux is here, but headless:
+//! it owns the session's process and draws nothing, and the app reads what that
+//! process draws over a control-mode client and renders every cell itself. What
+//! the multiplexer buys is the one thing an owned terminal could not — **quitting
+//! the app kills nothing.** The session is still running afterwards.
 //!
 //! One spawn so far, and the list beside it says what that spawn is doing: a
 //! supervisor thread works it out about five times a second and sends the list
 //! an immutable snapshot. What it proves is the whole path — a worktree on a
-//! branch of its own, a window composed around it, a session running in it, and
-//! a row that tells the truth about it.
+//! branch of its own, a window nobody sees, a session running in it, its screen
+//! in the slot, and a row that tells the truth about it.
 
 mod app;
 mod cli;
+mod control;
 mod error;
 mod git;
 mod harness;
+mod keys;
 mod names;
 mod process;
+mod screen;
 mod snapshot;
 mod supervisor;
 mod tmux;
@@ -32,7 +36,7 @@ mod worktrees;
 use std::process::ExitCode;
 
 use crate::cli::{Invocation, Request};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::snapshot::Watched;
 
 fn main() -> ExitCode {
@@ -55,22 +59,20 @@ fn run() -> Result<()> {
     }
 }
 
-/// Create the worktree, compose the window, and start the session in it.
+/// Create the worktree, open a window nobody sees, and start the session in it.
 ///
-/// The order matters: everything that can refuse does so before tmux is
-/// involved, so a refusal lands on the shell the user is looking at rather than
-/// flashing past inside a session that closes behind it. Not being in tmux is
-/// refused first of all, because it is the one refusal that costs nothing to
-/// check and would otherwise land after a worktree had been created.
+/// The order matters twice over.
+///
+/// **Everything that can refuse does so before the screen is taken over**, so a
+/// refusal lands on the shell the user is looking at rather than flashing past
+/// on an alternate screen that closes behind it.
+///
+/// **The grid goes behind the pane before the harness is started in it.** A
+/// control-mode client streams only what is produced while it is attached, so a
+/// session that drew itself before anything was listening would leave a slot
+/// that stays blank for ever — and nothing about it would look like an error.
 fn spawn(request: Request) -> Result<()> {
-    if !tmux::inside_session() {
-        return Err(Error::new(
-            "this has to run inside tmux. It composes a window around the session it \
-             starts — the list on the left, the session on the right — and to do that it \
-             has to be a pane in that window itself. Start `tmux`, then run this again \
-             from inside it.",
-        ));
-    }
+    let slot = app::slot_now()?;
 
     let repository = git::open(&request.repository)?;
     let start_point = git::default_branch(&repository)?;
@@ -94,14 +96,14 @@ fn spawn(request: Request) -> Result<()> {
         worktree: process::path_argument(&worktree)?.to_string(),
     };
 
-    // The app is already a pane, so the window it is in becomes the window: the
-    // slot is split off the app's own pane, and whatever else the user had in
-    // that window is left alone rather than killed to make room.
-    let tmux = tmux::Server::inherited();
-    let slot = tmux.open_slot(&tmux::current_pane()?, &recipe)?;
-    tmux.select_pane(&slot)?;
+    let tmux = tmux::Server::app();
+    let session = tmux.session(slot)?;
+    let client = control::Client::attach(&tmux, &session, slot)?;
+    let pane = tmux.open_window(&session, &view.spawn)?;
+    let grid = client.watch(&pane, slot);
+    tmux.start(&pane, &recipe)?;
 
-    let snapshots = supervisor::watch(tmux, vec![Watched::new(view.spawn.clone(), slot)]);
+    let snapshots = supervisor::watch(tmux, vec![Watched::new(view.spawn.clone(), pane.clone())]);
 
-    app::run(&view, &snapshots)
+    app::run(&app::Spawn { view, pane, grid }, &snapshots, &client)
 }

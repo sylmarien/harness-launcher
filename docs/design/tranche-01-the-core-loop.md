@@ -329,11 +329,15 @@ difference to anything.
 **The cost is a terminal emulator, and it is real.** The four sharp edges the research
 found are now the app's to solve rather than tmux's:
 
-- **The emulator must be able to answer the child.** Terminals reply to queries — cursor
-  position among them, which Claude Code issues. An emulator with no write-back path
-  drops them silently. This is the sharpest of the four and **control mode does not
-  solve it**: the reply path exists (`send-keys -H`), but something still has to generate
-  the reply. Carried as a named risk in §5.3.
+- ~~**The emulator must be able to answer the child.**~~ **Withdrawn 2026-08-10** — it
+  read *"Terminals reply to queries — cursor position among them, which Claude Code
+  issues. An emulator with no write-back path drops them silently. This is the sharpest
+  of the four and control mode does not solve it: the reply path exists (`send-keys -H`),
+  but something still has to generate the reply."* Control mode does solve it, and by
+  removing the problem rather than by carrying the reply: **tmux is the child's terminal
+  and answers the queries itself.** The full account is in §5.3, including why the app
+  must now be careful *not* to answer. This edge belongs to *own the pty*, which is the
+  alternative that was rejected.
 - **Resize is lossy**, and a common source of crashes where wide glyphs meet narrow
   panes.
 - **Mouse forwarding is a hand-written protocol bridge**, with several independent
@@ -700,6 +704,13 @@ emulator per thread, or drop frames for spawns that are not on screen) and none 
 changes the design, which is why this is recorded as a risk to measure during the
 walking skeleton rather than a decision to take now.
 
+> **Measured 2026-08-10, and only at the cheap end.** Eight panes drawing at once are
+> routed correctly and none is dropped — an integration test that will fail if the reader
+> ever mixes panes up under load. **That is separation, not throughput**: twenty
+> continuously-redrawing fullscreen agents remain untested, and the risk as written stands
+> until something drives that many. Worth knowing what the test *would* catch first,
+> which is the failure that would otherwise look like one spawn being mysteriously blank.
+
 **Screen priming is a genuine cost of control mode, not a wrinkle.** It streams only what
 is produced **while a client is attached** — attach after a child has already drawn itself
 and the grid stays permanently blank, with no catch-up short of priming from
@@ -796,12 +807,33 @@ Not decided, and not oversights:
   knowing that it is the largest open item on this list.
 - **Distribution** — run from source, or something installable.
 - **Logging and diagnostics** — how the author debugs the app while twenty children run.
-- **Answering the child's terminal queries** — a **named risk** rather than a comfortable
-  omission, new with §4.1. An emulator with no write-back path silently drops
-  cursor-position reports and their kin, and Claude Code issues them. The transport back
-  exists (`send-keys -H` on the control client); what is undecided is which emulator
-  generates the replies, and what breaks if none does. Most likely thing to bite during
-  the walking skeleton, so it is the first thing to test against a real `claude`.
+- ~~**Answering the child's terminal queries**~~ — **closed 2026-08-10 during the
+  migration, and it was never a risk under this mechanism.** It read: *"a named risk
+  rather than a comfortable omission, new with §4.1. An emulator with no write-back path
+  silently drops cursor-position reports and their kin, and Claude Code issues them. The
+  transport back exists (`send-keys -H` on the control client); what is undecided is
+  which emulator generates the replies, and what breaks if none does. Most likely thing
+  to bite during the walking skeleton, so it is the first thing to test against a real
+  `claude`."*
+
+  **What it missed is which terminal the child is talking to.** Under *own the pty* the
+  app is that terminal, and the gap is real. Under *supervise + render* it is not: tmux
+  is the child's terminal, it emulates the pane fully, and it answers `CSI 6 n` and its
+  kin itself before ever passing the bytes on. The app's grid renders a copy of a
+  conversation that has already been had. Verified against tmux 3.4 by starting a pane
+  that asks and reads the answer back on its own input — it arrives, with nothing from
+  the app — and kept as an integration test.
+
+  **So the app must not write back**, which is the opposite of the mitigation this entry
+  was reaching for: a reply of the app's own would arrive at the child as a *second* one,
+  which is to say as keystrokes nobody typed. Recorded at length because the entry was
+  right about the mechanism and wrong about whose problem it was, and a later reader
+  finding `vt100` has no write-back path would otherwise set out to add one.
+
+  **Still open, and smaller:** anything tmux itself declines to answer is unanswered, and
+  a mismatch between tmux's emulation and `vt100`'s shows up as a grid that drifts from
+  what the child believes it drew. Neither has been seen; neither is tested against a
+  real `claude`, which stays a thing to sit down and look at (§8).
 
 The disposition that governs all of these: **get the app running.** Where simplicity now
 creates a problem later, that problem belongs to a later tranche — deliberately, not by
@@ -1010,10 +1042,12 @@ the prototype deliberately drew the grid itself, to keep the experiment about th
 emulator's fidelity rather than a wrapper's version compatibility, and the same reasoning
 applies to the build until there is a reason to add the layer.
 
-**`vt100` has no write-back path**, which is precisely the gap §5.3 names. It is the
-first thing to test against a real `claude`, and the first reason to go looking at
-another crate. Recorded here rather than in the body because it is a property of this
-crate, not of the design.
+**`vt100` has no write-back path**, and — **as of 2026-08-10 — that is fine, and adding
+one would be a bug.** This previously read that the missing path "is precisely the gap
+§5.3 names… the first reason to go looking at another crate". It is not a gap: tmux
+answers the child's queries as its terminal, and a second answer from the app would reach
+the child as keystrokes nobody typed (§5.3). The crate's limitation and this design's
+needs happen to line up exactly.
 
 **The pty for the control client: `portable-pty`.** Not for the children — tmux owns
 those — but because a control-mode client refuses to run on piped stdio (§4.8). One pty

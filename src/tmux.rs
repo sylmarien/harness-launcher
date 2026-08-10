@@ -1,8 +1,15 @@
-//! The window the app composes.
+//! tmux, as a process supervisor.
 //!
-//! The app drives tmux rather than embedding terminals. The multiplexer owns the
-//! pty, so no terminal emulation is written here: resize, mouse, scrollback,
-//! alternate screen and colour are its problem, and it solves them properly.
+//! It draws nothing. One detached session on a socket of the app's own, one
+//! window per spawn, one pane per window, and not a single one of them ever
+//! attached to a terminal a person is looking at. What the multiplexer is here
+//! for is exactly one thing: **a process that outlives the app**. Quitting kills
+//! nothing, because nothing the user started belongs to the app's own process
+//! tree.
+//!
+//! Output leaves by the other road — the control-mode client in [`crate::control`],
+//! which is attached before anything is started. This module is commands and
+//! facts: make a window, start something in it, ask what is still alive.
 //!
 //! What arrives from the harness is a recipe — a program, its arguments, its
 //! environment, its working directory. Nothing in this module knows what that
@@ -10,44 +17,44 @@
 //! sees them.
 
 use std::collections::HashMap;
-use std::env;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::harness::LaunchRecipe;
 use crate::process::{self, path_argument};
+use crate::screen::Size;
 
-/// How much of the window the slot takes.
+/// The socket the app's own server listens on.
 ///
-/// A share rather than a size: the window is whatever the terminal is, and a
-/// maximised terminal must not be a bigger frame around the same small layout.
-const SLOT_SHARE: &str = "66%";
+/// A server of the app's own rather than whichever one `tmux` would find: the
+/// session here is furniture, and it has no business appearing in the sessions
+/// a person switches between. It also makes the app's behaviour identical
+/// whether or not it happens to have been started from inside tmux.
+const SOCKET: &str = "harness-launcher";
+
+/// The one session every spawn is a window of.
+const SESSION: &str = "spawns";
 
 /// tmux's name for "leave a pane behind when what ran in it stops".
 const REMAIN_ON_EXIT: &str = "remain-on-exit";
 
+/// What holds a window open until there is something real to run in it.
+///
+/// Two jobs. It keeps the session alive before the first spawn and after the
+/// last one stops — a session with no windows is a session tmux discards, and
+/// with it the control client's attachment. And it is what a spawn's window is
+/// *born* running, so that the client can be watching the pane before the
+/// harness writes its first byte: control mode streams only what is produced
+/// while a client is attached, and a pane that draws itself before anyone is
+/// listening stays permanently blank.
+const HOLDER: [&str; 3] = ["sh", "-c", "while :; do sleep 3600; done"];
+
 /// What one tick asks about every pane on the server.
 ///
 /// Four fields, one call, however many spawns there are. `pane_dead` is only
-/// meaningful because the slot is created with `remain-on-exit`: without it a
+/// meaningful because the server is left with `remain-on-exit` on: without it a
 /// pane that stops disappears, and death would have to be inferred from absence
 /// — which is a different thing, and reported differently.
 const PANE_FORMAT: &str = "#{pane_id} #{pane_dead} #{pane_pid} #{pane_tty}";
-
-/// Whether the app was started from inside tmux.
-///
-/// It has to be: the app takes over the window it is already in, and there is
-/// no window to take over otherwise. Started anywhere else, it refuses and says
-/// so rather than building a window and moving the user into it.
-pub fn inside_session() -> bool {
-    env::var_os("TMUX").is_some_and(|value| !value.is_empty())
-}
-
-/// The pane the app is running in.
-pub fn current_pane() -> Result<String> {
-    env::var("TMUX_PANE").map_err(|_| {
-        Error::new("$TMUX_PANE is not set, so the app cannot tell which pane it is in")
-    })
-}
 
 /// One pane, as tmux reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,53 +112,84 @@ impl Panes {
 
 /// A tmux server, and everything the app asks of one.
 pub struct Server {
-    /// The socket to talk over, or none for whichever server `tmux` finds by
-    /// itself — which inside a session is the one the user is already in.
-    socket: Option<String>,
+    /// The socket to talk over.
+    socket: String,
 }
 
 impl Server {
-    /// The server the terminal already belongs to.
-    pub fn inherited() -> Self {
-        Self { socket: None }
+    /// The app's own server.
+    pub fn app() -> Self {
+        Self::on_socket(SOCKET)
     }
 
-    /// A server of its own, so a test never touches the user's.
-    #[cfg(test)]
+    /// A server on a named socket — the app's, or a test's own.
     fn on_socket(socket: &str) -> Self {
         Self {
-            socket: Some(socket.to_string()),
+            socket: socket.to_string(),
         }
     }
 
-    /// Split a pane and start the session beside it. Returns the new pane's id.
-    ///
-    /// The slot keeps `remain-on-exit`, so a session that stops leaves its last
-    /// screen behind rather than vanishing — the app never reads a pane's
-    /// output, so that screen is the only account of what went wrong with it.
-    ///
-    /// The option goes on the *window* first and is pinned to the pane
-    /// afterwards, because a session that dies the instant it starts — bad
-    /// credentials, a rejected flag — would be reaped before a second call could
-    /// set anything, losing exactly the screen the option exists to keep. The
-    /// window is then put back as it was found, which matters when the window is
-    /// one the app took over from the user.
-    pub fn open_slot(&self, target: &str, recipe: &LaunchRecipe) -> Result<String> {
-        let previously = self.window_option(target, REMAIN_ON_EXIT)?;
-        self.run(&["set-option", "-w", "-t", target, REMAIN_ON_EXIT, "on"])?;
-
-        let slot = self.split(target, recipe);
-        let restored = self.restore_window_option(target, REMAIN_ON_EXIT, previously);
-
-        let slot = slot?;
-        restored?;
-
-        Ok(slot)
+    /// The socket this server is reached on, for anyone spawning their own
+    /// `tmux` — which is the control client, and nobody else.
+    pub fn socket(&self) -> &str {
+        &self.socket
     }
 
-    /// Put the keyboard on a pane.
-    pub fn select_pane(&self, pane: &str) -> Result<()> {
-        self.run(&["select-pane", "-t", pane])?;
+    /// The session every spawn lives in, made if it is not there yet.
+    ///
+    /// Detached, and never otherwise: `-d` is what keeps it out of the terminal
+    /// the user is looking at. The size given here is the slot's, because the
+    /// slot is what a spawn draws into; it is also what a window created later
+    /// inherits, so the first spawn is the right shape before it starts.
+    ///
+    /// `remain-on-exit` goes on globally rather than being set and put back
+    /// around each window. The server belongs to the app alone, so there is no
+    /// user's setting here to preserve — which is the whole of what the old
+    /// save-and-restore dance was for.
+    pub fn session(&self, size: Size) -> Result<String> {
+        if !process::run("tmux", &self.with_socket(&["has-session", "-t", SESSION]))?.ok {
+            self.run(&held(vec![
+                "new-session".to_string(),
+                "-d".to_string(),
+                "-s".to_string(),
+                SESSION.to_string(),
+                "-x".to_string(),
+                size.columns.to_string(),
+                "-y".to_string(),
+                size.rows.to_string(),
+            ]))?;
+            self.run(&["set-option", "-g", "-w", REMAIN_ON_EXIT, "on"])?;
+        }
+
+        Ok(SESSION.to_string())
+    }
+
+    /// Open a window for a spawn, with nothing of the spawn's in it yet.
+    ///
+    /// Returns the id of its one pane. Nothing runs there but the holder, which
+    /// is the point: the caller has the pane's id before anything draws, and can
+    /// put a grid behind it before starting the harness with [`Server::start`].
+    pub fn open_window(&self, session: &str, name: &str) -> Result<String> {
+        self.run(&held(vec![
+            "new-window".to_string(),
+            "-d".to_string(),
+            "-t".to_string(),
+            session.to_string(),
+            "-n".to_string(),
+            name.to_string(),
+            "-P".to_string(),
+            "-F".to_string(),
+            "#{pane_id}".to_string(),
+        ]))
+    }
+
+    /// Start the harness in a pane the holder is keeping warm.
+    pub fn start(&self, pane: &str, recipe: &LaunchRecipe) -> Result<()> {
+        self.run(&respawn_arguments(
+            pane,
+            path_argument(&recipe.cwd)?,
+            recipe,
+        ))?;
 
         Ok(())
     }
@@ -169,43 +207,6 @@ impl Server {
         ])?))
     }
 
-    /// Create the slot's pane, and pin the option it was born with to it.
-    fn split(&self, target: &str, recipe: &LaunchRecipe) -> Result<String> {
-        let pane = self.run(&split_arguments(
-            target,
-            path_argument(&recipe.cwd)?,
-            recipe,
-        ))?;
-        self.run(&["set-option", "-p", "-t", &pane, REMAIN_ON_EXIT, "on"])?;
-
-        Ok(pane)
-    }
-
-    /// What a window option is set to on the window itself, if anything.
-    fn window_option(&self, target: &str, name: &str) -> Result<Option<String>> {
-        let shown = self.run(&["show-options", "-w", "-t", target, name])?;
-
-        Ok(shown
-            .strip_prefix(name)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()))
-    }
-
-    /// Put a window option back the way it was — including back to unset.
-    fn restore_window_option(
-        &self,
-        target: &str,
-        name: &str,
-        previously: Option<String>,
-    ) -> Result<()> {
-        match previously {
-            Some(value) => self.run(&["set-option", "-w", "-t", target, name, &value])?,
-            None => self.run(&["set-option", "-w", "-t", target, "-u", name])?,
-        };
-
-        Ok(())
-    }
-
     /// Ask tmux something, on this server.
     fn run<A: AsRef<str>>(&self, arguments: &[A]) -> Result<String> {
         process::run_ok("tmux", &self.with_socket(arguments))
@@ -214,35 +215,34 @@ impl Server {
     /// The arguments, addressed to this server rather than whichever one tmux
     /// would pick.
     fn with_socket<'a, A: AsRef<str>>(&'a self, arguments: &'a [A]) -> Vec<&'a str> {
-        let mut all = Vec::new();
-        if let Some(socket) = &self.socket {
-            all.push("-L");
-            all.push(socket.as_str());
-        }
+        let mut all = vec!["-L", self.socket.as_str()];
         all.extend(arguments.iter().map(AsRef::as_ref));
 
         all
     }
 }
 
-/// The `split-window` call that creates the slot.
-fn split_arguments(target: &str, cwd: &str, recipe: &LaunchRecipe) -> Vec<String> {
-    let mut arguments: Vec<String> = [
-        "split-window",
-        "-h",
-        "-l",
-        SLOT_SHARE,
-        "-t",
-        target,
-        "-c",
-        cwd,
-        "-P",
-        "-F",
-        "#{pane_id}",
-    ]
-    .iter()
-    .map(|argument| (*argument).to_string())
-    .collect();
+/// A command that creates a pane, with the holder as what it starts.
+///
+/// The `--` matters as much as the holder does: everything after it is an
+/// argument vector rather than something for a shell to read.
+fn held(mut arguments: Vec<String>) -> Vec<String> {
+    arguments.push("--".to_string());
+    arguments.extend(HOLDER.iter().map(|word| (*word).to_string()));
+
+    arguments
+}
+
+/// The `respawn-pane` call that replaces the holder with the harness.
+///
+/// `-k` kills what is there, which is the holder and never a spawn: this runs
+/// once, on a pane opened moments earlier. The command is passed one argument
+/// at a time, so no shell sees the work the user typed.
+fn respawn_arguments(pane: &str, cwd: &str, recipe: &LaunchRecipe) -> Vec<String> {
+    let mut arguments: Vec<String> = ["respawn-pane", "-k", "-t", pane, "-c", cwd]
+        .iter()
+        .map(|argument| (*argument).to_string())
+        .collect();
 
     for (name, value) in &recipe.env {
         arguments.push("-e".to_string());
@@ -257,7 +257,7 @@ fn split_arguments(target: &str, cwd: &str, recipe: &LaunchRecipe) -> Vec<String
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::thread::sleep;
@@ -284,8 +284,15 @@ mod tests {
     }
 
     #[test]
-    fn the_slot_starts_the_harness_in_its_worktree() {
-        let arguments = split_arguments("%3", "/worktrees/add-retry-logic-a7f3", &recipe());
+    fn the_harness_starts_in_the_pane_the_spawn_was_given() {
+        let arguments = respawn_arguments("%3", "/worktrees/add-retry-logic-a7f3", &recipe());
+
+        assert_eq!(value_after(&arguments, "-t"), "%3");
+    }
+
+    #[test]
+    fn the_harness_starts_in_its_worktree() {
+        let arguments = respawn_arguments("%3", "/worktrees/add-retry-logic-a7f3", &recipe());
 
         assert_eq!(
             value_after(&arguments, "-c"),
@@ -295,40 +302,20 @@ mod tests {
 
     #[test]
     fn the_recipes_environment_reaches_the_pane() {
-        let arguments = split_arguments("%3", "/worktrees/x", &recipe());
+        let arguments = respawn_arguments("%3", "/worktrees/x", &recipe());
 
         assert_eq!(value_after(&arguments, "-e"), "SOME_VARIABLE=1");
     }
 
     #[test]
     fn the_command_is_passed_one_argument_at_a_time_so_no_shell_sees_it() {
-        let arguments = split_arguments("%3", "/worktrees/x", &recipe());
+        let arguments = respawn_arguments("%3", "/worktrees/x", &recipe());
         let command = &arguments[arguments.iter().position(|a| a == "--").unwrap() + 1..];
 
         assert_eq!(command, ["some-harness", "--flag", "do the work"]);
     }
 
-    #[test]
-    fn the_slot_is_sized_as_a_share_of_the_window() {
-        let arguments = split_arguments("%3", "/worktrees/x", &recipe());
-
-        assert_eq!(value_after(&arguments, "-l"), SLOT_SHARE);
-        assert!(
-            SLOT_SHARE.ends_with('%'),
-            "the slot must not be a fixed size"
-        );
-    }
-
-    #[test]
-    fn the_slot_is_split_off_the_pane_it_is_told_to_split() {
-        let arguments = split_arguments("%3", "/worktrees/x", &recipe());
-
-        assert_eq!(value_after(&arguments, "-t"), "%3");
-    }
-
-    /// A real `list-panes` from a real tmux — see `captured/README.md`. Its
-    /// window is the shape the app composes: a list pane, a live slot, and a
-    /// slot whose session stopped and was kept by `remain-on-exit`.
+    /// A real `list-panes` from a real tmux — see `captured/README.md`.
     const CAPTURED: &str = include_str!("../captured/tmux-list-panes.txt");
 
     #[test]
@@ -374,14 +361,14 @@ mod tests {
     // hermetic enough not to need either.
 
     /// A tmux server that belongs to one test and dies with it.
-    struct PrivateTmux {
-        server: Server,
+    pub struct PrivateTmux {
+        pub server: Server,
         socket: String,
         worktree: TempDir,
     }
 
     impl PrivateTmux {
-        fn start(name: &str) -> Self {
+        pub fn start(name: &str) -> Self {
             let socket = format!("harness-launcher-{name}");
             let private = Self {
                 server: Server::on_socket(&socket),
@@ -393,32 +380,9 @@ mod tests {
             private
         }
 
-        /// A window with one pane in it, minding its own business — which is
-        /// what the app finds when it is started: a window somebody else made.
-        fn window(&self, session: &str) -> String {
-            self.server
-                .run(&[
-                    "new-session",
-                    "-d",
-                    "-s",
-                    session,
-                    "-x",
-                    "120",
-                    "-y",
-                    "30",
-                    "--",
-                    "sh",
-                    "-c",
-                    "sleep 120",
-                ])
-                .unwrap();
-
-            format!("{session}:")
-        }
-
         /// A recipe for a harmless stand-in: no harness is ever really started
         /// in a test, because the real one costs tokens and needs credentials.
-        fn recipe(&self, script: &str) -> LaunchRecipe {
+        pub fn recipe(&self, script: &str) -> LaunchRecipe {
             LaunchRecipe {
                 program: "sh".to_string(),
                 args: vec!["-c".to_string(), script.to_string()],
@@ -427,7 +391,11 @@ mod tests {
             }
         }
 
-        fn panes(&self, format: &str) -> String {
+        pub fn worktree(&self) -> &std::path::Path {
+            self.worktree.path()
+        }
+
+        pub fn panes(&self, format: &str) -> String {
             self.server
                 .run(&["list-panes", "-a", "-F", format])
                 .unwrap()
@@ -438,7 +406,7 @@ mod tests {
         }
 
         /// Wait for something tmux only knows once a child has got going.
-        fn until(&self, what: &str, ready: impl Fn(&str) -> bool) -> String {
+        pub fn until(&self, what: &str, ready: impl Fn(&str) -> bool) -> String {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 let seen = self.panes(what);
@@ -457,26 +425,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_slot_runs_the_harness_where_and_how_the_recipe_said() {
-        let tmux = PrivateTmux::start("slot-runs-the-recipe");
-        let window = tmux.window("work");
+    /// The shape of a slot, for the tests that care what a pane was born as.
+    const SLOT: Size = Size {
+        columns: 61,
+        rows: 17,
+    };
 
-        let slot = tmux
+    #[test]
+    fn the_session_is_detached_and_stays_that_way() {
+        let tmux = PrivateTmux::start("session-is-detached");
+
+        let session = tmux.server.session(SLOT).unwrap();
+
+        let sessions = tmux
             .server
-            .open_slot(&window, &tmux.recipe("printenv PROBE; sleep 120"))
+            .run(&[
+                "list-sessions",
+                "-F",
+                "#{session_name} attached=#{session_attached}",
+            ])
+            .unwrap();
+        assert_eq!(sessions, format!("{session} attached=0"));
+    }
+
+    #[test]
+    fn asking_for_the_session_twice_does_not_make_a_second_one() {
+        let tmux = PrivateTmux::start("session-is-made-once");
+        tmux.server.session(SLOT).unwrap();
+
+        tmux.server.session(SLOT).unwrap();
+
+        assert_eq!(
+            tmux.server.run(&["list-sessions"]).unwrap().lines().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_spawns_window_is_born_the_size_of_the_slot() {
+        let tmux = PrivateTmux::start("window-is-born-slot-sized");
+        let session = tmux.server.session(SLOT).unwrap();
+
+        let pane = tmux
+            .server
+            .open_window(&session, "add-retry-logic-a7f3")
+            .unwrap();
+
+        let sizes = tmux.panes("#{pane_id} #{pane_width}x#{pane_height}");
+        assert!(
+            sizes.contains(&format!("{pane} {}x{}", SLOT.columns, SLOT.rows)),
+            "the pane is not the shape of the slot: {sizes}"
+        );
+    }
+
+    #[test]
+    fn a_spawn_runs_the_harness_where_and_how_the_recipe_said() {
+        let tmux = PrivateTmux::start("spawn-runs-the-recipe");
+        let session = tmux.server.session(SLOT).unwrap();
+        let pane = tmux.server.open_window(&session, "spawn").unwrap();
+
+        tmux.server
+            .start(&pane, &tmux.recipe("printenv PROBE; sleep 120"))
             .unwrap();
 
         let shown = tmux.until("#{pane_id} #{pane_current_path}", |seen| {
-            seen.contains(&format!("{slot} "))
+            seen.contains(tmux.worktree().to_str().unwrap())
         });
         assert!(
-            shown.contains(tmux.worktree.path().to_str().unwrap()),
-            "the slot did not start in the worktree: {shown}"
+            shown.contains(&format!("{pane} ")),
+            "the spawn did not start in the worktree: {shown}"
         );
         let printed = tmux
             .server
-            .run(&["capture-pane", "-p", "-t", &slot])
+            .run(&["capture-pane", "-p", "-t", &pane])
             .unwrap();
         assert!(
             printed.contains("probe-value"),
@@ -487,124 +508,58 @@ mod tests {
     #[test]
     fn a_session_that_stops_at_once_still_leaves_its_pane_behind() {
         let tmux = PrivateTmux::start("stopping-leaves-the-pane");
-        let window = tmux.window("work");
+        let session = tmux.server.session(SLOT).unwrap();
+        let pane = tmux.server.open_window(&session, "spawn").unwrap();
 
-        let slot = tmux
-            .server
-            .open_slot(&window, &tmux.recipe("exit 3"))
-            .unwrap();
+        tmux.server.start(&pane, &tmux.recipe("exit 3")).unwrap();
 
         let panes = tmux.until("#{pane_id} dead=#{pane_dead}", |seen| {
             seen.contains("dead=1")
         });
         assert!(
-            panes.contains(&format!("{slot} dead=1")),
-            "the slot was reaped instead of kept: {panes}"
+            panes.contains(&format!("{pane} dead=1")),
+            "the spawn was reaped instead of kept: {panes}"
         );
     }
 
     #[test]
-    fn the_window_is_left_as_the_app_found_it() {
-        let tmux = PrivateTmux::start("window-left-as-found");
-        let window = tmux.window("work");
+    fn the_last_spawn_stopping_does_not_take_the_session_with_it() {
+        let tmux = PrivateTmux::start("session-outlives-its-spawns");
+        let session = tmux.server.session(SLOT).unwrap();
+        let pane = tmux.server.open_window(&session, "spawn").unwrap();
+        tmux.server.start(&pane, &tmux.recipe("exit 3")).unwrap();
+        tmux.until("#{pane_dead}", |seen| seen.contains('1'));
 
-        let slot = tmux
-            .server
-            .open_slot(&window, &tmux.recipe("sleep 120"))
-            .unwrap();
-
-        assert_eq!(
-            tmux.server.window_option(&window, REMAIN_ON_EXIT).unwrap(),
-            None,
-            "the app left its own setting on the user's window"
-        );
-        let pinned = tmux
-            .server
-            .run(&["show-options", "-p", "-t", &slot, REMAIN_ON_EXIT])
-            .unwrap();
-        assert_eq!(pinned, "remain-on-exit on");
-    }
-
-    #[test]
-    fn a_window_that_already_had_a_setting_keeps_it() {
-        let tmux = PrivateTmux::start("window-keeps-its-setting");
-        let window = tmux.window("work");
-        tmux.server
-            .run(&["set-option", "-w", "-t", &window, REMAIN_ON_EXIT, "off"])
-            .unwrap();
-
-        tmux.server
-            .open_slot(&window, &tmux.recipe("sleep 120"))
-            .unwrap();
-
-        assert_eq!(
-            tmux.server.window_option(&window, REMAIN_ON_EXIT).unwrap(),
-            Some("off".to_string())
-        );
-    }
-
-    #[test]
-    fn the_app_keeps_the_left_and_the_slot_takes_the_right() {
-        let tmux = PrivateTmux::start("the-app-keeps-the-left");
-        tmux.window("work");
-        let here = tmux.panes("#{pane_id}").trim().to_string();
-
-        let slot = tmux
-            .server
-            .open_slot(&here, &tmux.recipe("sleep 120"))
-            .unwrap();
-        tmux.server.select_pane(&slot).unwrap();
-
-        let panes =
-            tmux.panes("#{pane_id} left=#{pane_left} width=#{pane_width} active=#{pane_active}");
-        let rows: Vec<&str> = panes.lines().collect();
-        assert_eq!(rows.len(), 2, "expected the app's pane and a slot: {panes}");
-        let list = rows.iter().find(|row| !row.starts_with(&slot)).unwrap();
-        let slot_row = rows.iter().find(|row| row.starts_with(&slot)).unwrap();
         assert!(
-            list.contains("left=0"),
-            "the list is not on the left: {panes}"
-        );
-        assert!(
-            !slot_row.contains("left=0"),
-            "the slot is not on the right: {panes}"
-        );
-        assert!(
-            slot_row.contains("active=1"),
-            "the keyboard was left off the slot: {panes}"
-        );
-        assert!(
-            slot_row.contains("width=79"),
-            "the slot did not take its share of 120 columns: {panes}"
+            tmux.server.run(&["has-session", "-t", &session]).is_ok(),
+            "the session went with the spawn that stopped"
         );
     }
 
     #[test]
     fn one_call_reads_the_liveness_of_every_pane_there_is() {
         let tmux = PrivateTmux::start("one-call-reads-every-pane");
-        let window = tmux.window("work");
-        let alive = tmux
-            .server
-            .open_slot(&window, &tmux.recipe("sleep 120"))
+        let session = tmux.server.session(SLOT).unwrap();
+        let alive = tmux.server.open_window(&session, "alive").unwrap();
+        tmux.server
+            .start(&alive, &tmux.recipe("sleep 120"))
             .unwrap();
-        let stopped = tmux
-            .server
-            .open_slot(&window, &tmux.recipe("exit 3"))
-            .unwrap();
+        let stopped = tmux.server.open_window(&session, "stopped").unwrap();
+        tmux.server.start(&stopped, &tmux.recipe("exit 3")).unwrap();
         tmux.until("#{pane_dead}", |seen| seen.contains('1'));
 
         let panes = tmux.server.panes().unwrap();
 
-        let alive = panes.get(&alive).expect("the live slot was not listed");
+        let alive = panes.get(&alive).expect("the live spawn was not listed");
         assert!(!alive.dead);
         assert!(alive.pid > 0, "no process id for a live pane: {alive:?}");
         assert!(alive.tty.starts_with("/dev/"), "{alive:?}");
         assert!(
             panes
                 .get(&stopped)
-                .expect("the stopped slot was not listed")
+                .expect("the stopped spawn was not listed")
                 .dead,
-            "the stopped slot did not read as dead"
+            "the stopped spawn did not read as dead"
         );
     }
 }
