@@ -19,7 +19,18 @@ the network, creates a worktree on a branch of its own under an app-owned root,
 and starts the session in it. Then it draws the whole screen — the list on the
 left, the session in the slot on the right, and the line between them.
 Everything you type goes to the session, as if you had started it yourself.
-**F10 quits**, and it is the only key the app keeps for itself.
+**F6 and F7 move the selection up and down the list, F10 quits** — and those
+three are the whole of the app's keyboard so far. How the keyboard is split
+between the app and the spawn is still an open question in the design; these
+three are what the list needs and nothing more is claimed.
+
+The list groups spawns under the repository they were started against, each
+repository header carrying a compact bar of its spawns' statuses so a project
+reads without reading its rows. Within a repository the order is
+attention-first: stopped, then unknown, then working. Status is carried by an
+icon and a colour together, so the list needs no legend and survives a
+colour-blind reader. The selected spawn says what the app made for it — its
+branch, its worktree, and the reason if the app cannot tell what it is doing.
 
 tmux is here, but you never see it: a **detached** session on a socket of the
 app's own, one invisible window per spawn, drawing nothing. It owns the

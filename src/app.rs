@@ -8,7 +8,8 @@
 //! What is in the slot is a spawn's own screen: a grid the control-mode client
 //! keeps current whether or not it is the one being shown, copied here cell by
 //! cell. Keystrokes go the other way. **The app types into a spawn only what the
-//! user typed** — it has no keyboard of its own beyond the one key that quits.
+//! user typed** — it has no keyboard of its own beyond the three keys that leave
+//! and move the selection.
 //!
 //! Nothing here is a fixed size. Every dimension comes from the real terminal on
 //! every frame, so a maximised window is a bigger layout rather than a bigger
@@ -16,23 +17,23 @@
 //! the panes behind it.
 
 use std::io;
+use std::slice::from_ref;
 use std::sync::MutexGuard;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use ratatui::crossterm::terminal;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::widgets::{Block, Borders};
 
 use crate::control::{Client, Grid, POISONED};
 use crate::error::{Error, Result};
 use crate::keys::{self, Modes};
+use crate::list::{self, Cursor, Entry, Listing, Step};
 use crate::screen::{Screen, Size};
-use crate::snapshot::{Row, Snapshot, Status};
+use crate::snapshot::Snapshot;
 
 /// How long a frame waits for a keystroke before drawing itself again.
 ///
@@ -47,34 +48,24 @@ const FRAME: Duration = Duration::from_millis(16);
 /// around the same small layout.
 const LIST_SHARE: u16 = 33;
 
-/// The key that quits.
+/// Leave, which kills nothing.
 ///
 /// A function key because every ordinary one belongs to the spawn: a digit is
 /// exactly what you need to send when a harness asks you to pick an option, and
-/// `q` is a letter somebody is in the middle of typing. This is the whole of the
-/// app's keyboard, and how the rest of it is divided is not settled yet.
+/// `q` is a letter somebody is in the middle of typing. This and the two below
+/// are the whole of the app's keyboard so far, and how the rest of it is divided
+/// is not settled yet — so the keys that move the selection sit well away from
+/// the one that leaves, and nothing else is claimed.
 const QUIT: event::KeyCode = event::KeyCode::F(10);
-
-/// The colour reserved for the app failing to know something.
-const AMBER: Color = Color::Yellow;
-
-/// What the list has to say about a spawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct View {
-    /// The repository the spawn was started against.
-    pub repository: String,
-    /// The spawn's name.
-    pub spawn: String,
-    /// The branch it works on.
-    pub branch: String,
-    /// The worktree it works in.
-    pub worktree: String,
-}
+/// Take the selection one row up the list.
+const UP: event::KeyCode = event::KeyCode::F(6);
+/// Take it one row down.
+const DOWN: event::KeyCode = event::KeyCode::F(7);
 
 /// A spawn, as the screen needs it: what to say about it, and what it drew.
 pub struct Spawn {
     /// What the list says.
-    pub view: View,
+    pub entry: Entry,
     /// The pane it runs in, which is where keystrokes are addressed.
     pub pane: String,
     /// Its screen.
@@ -146,6 +137,8 @@ pub fn slot_now() -> Result<Size> {
 pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Result<()> {
     let mut latest = Snapshot::default();
     let mut showing = spawn.size();
+    let entries = from_ref(&spawn.entry);
+    let mut cursor = Cursor::on(&spawn.entry.spawn);
 
     ratatui::run(|terminal| -> io::Result<()> {
         loop {
@@ -153,7 +146,7 @@ pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Re
                 latest = snapshot;
             }
 
-            terminal.draw(|frame| render(frame, &spawn.view, &latest, &spawn.screen()))?;
+            terminal.draw(|frame| render(frame, entries, &latest, &cursor, &spawn.screen()))?;
 
             // A client that has gone leaves every grid exactly as it was, which
             // on screen is a session sitting there thinking. Asked here rather
@@ -176,6 +169,7 @@ pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Re
             match asked_for(spawn.modes())? {
                 Asked::Nothing => {}
                 Asked::Quit => return Ok(()),
+                Asked::Moved(step) => cursor.moved(&list::order(entries, &latest), step),
                 Asked::Typed(bytes) => {
                     client.send(&spawn.pane, &bytes).map_err(io::Error::other)?;
                 }
@@ -189,8 +183,10 @@ pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Re
 enum Asked {
     /// Nothing, in the time a frame waits.
     Nothing,
-    /// To leave — which kills nothing, and is the only key the app keeps.
+    /// To leave — which kills nothing.
     Quit,
+    /// To go up or down the list.
+    Moved(Step),
     /// Something for the spawn, already in the bytes a terminal would send.
     Typed(Vec<u8>),
 }
@@ -204,16 +200,28 @@ fn asked_for(modes: Modes) -> io::Result<Asked> {
     let Event::Key(key) = event::read()? else {
         return Ok(Asked::Nothing);
     };
+
+    Ok(what_it_means(key, modes))
+}
+
+/// What one keystroke means.
+///
+/// The whole of the split between the app's keyboard and the spawn's, in one
+/// place and with nothing else in it: everything not named here is on its way to
+/// the session, unchanged.
+fn what_it_means(key: KeyEvent, modes: Modes) -> Asked {
     // Terminals that report a key going back up send the same key twice, and a
     // spawn would be typed into twice.
     if key.kind != KeyEventKind::Press {
-        return Ok(Asked::Nothing);
-    }
-    if key.code == QUIT {
-        return Ok(Asked::Quit);
+        return Asked::Nothing;
     }
 
-    Ok(Asked::Typed(keys::typed(key, modes)))
+    match key.code {
+        QUIT => Asked::Quit,
+        UP => Asked::Moved(Step::Up),
+        DOWN => Asked::Moved(Step::Down),
+        _ => Asked::Typed(keys::typed(key, modes)),
+    }
 }
 
 /// How the screen is divided.
@@ -232,10 +240,16 @@ fn regions(area: Rect) -> (Rect, Rect, Rect) {
 }
 
 /// Paint one frame.
-pub fn render(frame: &mut Frame, view: &View, snapshot: &Snapshot, screen: &Screen) {
+pub fn render(
+    frame: &mut Frame,
+    entries: &[Entry],
+    snapshot: &Snapshot,
+    cursor: &Cursor,
+    screen: &Screen,
+) {
     let (list, separator, slot) = regions(frame.area());
 
-    frame.render_widget(listed(view, snapshot), list);
+    frame.render_widget(Listing::new(entries, snapshot, cursor), list);
     frame.render_widget(Block::new().borders(Borders::LEFT), separator);
     frame.render_widget(screen, slot);
 
@@ -250,81 +264,29 @@ pub fn render(frame: &mut Frame, view: &View, snapshot: &Snapshot, screen: &Scre
     }
 }
 
-/// The list, as one block of text.
-fn listed<'a>(view: &'a View, snapshot: &'a Snapshot) -> Paragraph<'a> {
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    let heading = Style::default().add_modifier(Modifier::BOLD);
-    let spawn = snapshot.of(&view.spawn);
-    let (mark, how_it_reads) = shown_as(spawn);
-
-    let mut lines = vec![
-        Line::styled("SPAWNS", heading),
-        Line::raw(""),
-        Line::styled(view.repository.clone(), heading),
-        Line::from(vec![
-            Span::raw("▍"),
-            Span::styled(mark, how_it_reads),
-            Span::styled(view.spawn.clone(), how_it_reads),
-        ]),
-        Line::styled(format!("  {}", view.branch), dim),
-        Line::styled(format!("  {}", view.worktree), dim),
-    ];
-    if let Some(why) = spawn.and_then(|row| row.reason.as_ref()) {
-        lines.push(Line::styled(format!("  {why}"), dim.fg(AMBER)));
-    }
-    lines.extend([
-        Line::raw(""),
-        Line::styled(
-            "the slot on the right is a real session — your keyboard is already on it",
-            dim,
-        ),
-        Line::styled("F10 quits the app and leaves the session running", dim),
-    ]);
-
-    Paragraph::new(lines)
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: false })
-}
-
-/// The mark a status is carried by, and how the row reads in it.
-///
-/// One answer rather than two, because the mark and the colour have to travel
-/// together: at twenty entries the list must read without a legend and survive
-/// a colour-blind reader, and a shape and a colour decided in separate places
-/// are two things that can come to disagree.
-///
-/// Working recedes, stopped is the only bright thing, unknown is the outlier. A
-/// spawn the app has not heard about yet is a blank of the same width, so a row
-/// does not shift sideways when the first snapshot lands.
-fn shown_as(row: Option<&Row>) -> (&'static str, Style) {
-    match row.map(|row| row.status) {
-        Some(Status::Working) => ("· ", Style::default().add_modifier(Modifier::DIM)),
-        Some(Status::Stopped) => ("● ", Style::default().add_modifier(Modifier::BOLD)),
-        Some(Status::Unknown) => ("? ", Style::default().fg(AMBER)),
-        None => ("  ", Style::default()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{Row, Status};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-    fn view() -> View {
-        View {
+    /// The one spawn the app has so far, and what the list says about it.
+    fn entries() -> Vec<Entry> {
+        vec![Entry {
             repository: "harness-launcher".to_string(),
             spawn: "add-retry-logic-a7f3".to_string(),
             branch: "spawn/add-retry-logic-a7f3".to_string(),
             worktree: "/data/harness-launcher/worktrees/add-retry-logic-a7f3".to_string(),
-        }
+        }]
     }
 
     /// What the supervisor would have said about the one spawn there is.
     fn saying(status: Status, reason: Option<&str>) -> Snapshot {
         Snapshot {
             rows: vec![Row {
-                name: view().spawn,
+                name: entries()[0].spawn.clone(),
                 status,
                 reason: reason.map(str::to_string),
             }],
@@ -349,10 +311,12 @@ mod tests {
             rows: height,
         };
         let screen = drew(slot_size(terminal), slot);
+        let entries = entries();
+        let cursor = Cursor::on(&entries[0].spawn);
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| render(frame, &view(), snapshot, &screen))
+            .draw(|frame| render(frame, &entries, snapshot, &cursor, &screen))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
@@ -403,30 +367,39 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_list_wraps_rather_than_losing_the_text() {
+    fn a_narrow_list_still_names_the_spawn_and_says_what_the_keyboard_does() {
         let screen = rendered(72, 24);
 
         assert!(screen.contains("add-retry-logic-a7f3"), "{screen}");
-        assert!(screen.contains("quits the app"), "{screen}");
+        assert!(screen.contains("F10 quits"), "{screen}");
     }
 
     #[test]
     fn a_wide_terminal_is_not_a_frame_around_a_narrow_one() {
+        let narrow = rendered(90, 12);
         let wide = rendered(200, 12);
 
-        let list = wide
+        assert!(
+            separator(&wide) > separator(&narrow),
+            "the list is the same width on a terminal twice the size:\n{wide}"
+        );
+    }
+
+    /// Which column the line between the list and the slot is drawn in.
+    fn separator(screen: &str) -> usize {
+        screen
             .lines()
-            .map(|line| line.split('│').next().unwrap_or_default().trim_end().len())
-            .max()
-            .unwrap();
-        assert!(list > 60, "the layout did not use the width:\n{wide}");
+            .find_map(|line| line.find('│'))
+            .unwrap_or_else(|| panic!("nothing divides the screen:\n{screen}"))
     }
 
     #[test]
-    fn a_terminal_too_short_for_everything_still_draws() {
+    fn a_terminal_too_short_for_everything_still_draws_the_spawn() {
         let screen = rendered(90, 3);
 
-        assert!(screen.contains("SPAWNS"), "{screen}");
+        // Three rows are not enough for the word above the list *and* the
+        // spawn, and the spawn is what the list is for.
+        assert!(screen.contains("add-retry-logic-a7f3"), "{screen}");
     }
 
     #[test]
@@ -499,7 +472,15 @@ mod tests {
 
         let (_, _, slot) = regions(Rect::new(0, 0, 90, 12));
         terminal
-            .draw(|frame| render(frame, &view(), &Snapshot::default(), &screen))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &entries(),
+                    &Snapshot::default(),
+                    &Cursor::default(),
+                    &screen,
+                );
+            })
             .unwrap();
 
         assert!(terminal.backend().cursor_visible());
@@ -519,7 +500,15 @@ mod tests {
         let screen = drew(size, "\x1b[?25l");
 
         terminal
-            .draw(|frame| render(frame, &view(), &Snapshot::default(), &screen))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &entries(),
+                    &Snapshot::default(),
+                    &Cursor::default(),
+                    &screen,
+                );
+            })
             .unwrap();
 
         assert!(!terminal.backend().cursor_visible());
@@ -625,5 +614,40 @@ mod tests {
             columns.windows(2).all(|pair| pair[0] == pair[1]),
             "the name shifted sideways as the status changed: {columns:?}"
         );
+    }
+
+    /// What the app makes of one key.
+    fn read_as(key: KeyEvent) -> Asked {
+        what_it_means(
+            key,
+            Modes {
+                application_cursor: false,
+            },
+        )
+    }
+
+    /// What it makes of one key being pressed and nothing else.
+    fn pressed(code: KeyCode) -> Asked {
+        read_as(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn the_app_keeps_three_keys_and_the_spawn_gets_every_other() {
+        assert!(matches!(pressed(QUIT), Asked::Quit));
+        assert!(matches!(pressed(UP), Asked::Moved(Step::Up)));
+        assert!(matches!(pressed(DOWN), Asked::Moved(Step::Down)));
+        assert!(matches!(pressed(KeyCode::Char('2')), Asked::Typed(bytes) if bytes == b"2"));
+        assert!(matches!(pressed(KeyCode::Esc), Asked::Typed(bytes) if bytes == [0x1b]));
+    }
+
+    #[test]
+    fn a_key_going_back_up_is_not_a_second_keystroke() {
+        let released = KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+
+        assert!(matches!(read_as(released), Asked::Nothing));
     }
 }

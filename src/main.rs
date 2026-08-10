@@ -17,6 +17,11 @@
 //! an immutable snapshot. What it proves is the whole path — a worktree on a
 //! branch of its own, a window nobody sees, a session running in it, its screen
 //! in the slot, and a row that tells the truth about it.
+//!
+//! The list itself is already the real one: spawns under the repository they
+//! were started against, attention-first, each repository header carrying a bar
+//! of its spawns' statuses. It is one row long only because only one spawn is
+//! started so far.
 
 mod app;
 mod cli;
@@ -25,6 +30,7 @@ mod error;
 mod git;
 mod harness;
 mod keys;
+mod list;
 mod names;
 mod process;
 mod screen;
@@ -89,7 +95,7 @@ fn spawn(request: Request) -> Result<()> {
         effort: request.effort,
         worktree: worktree.clone(),
     });
-    let view = app::View {
+    let entry = list::Entry {
         repository: repository.name().to_string(),
         spawn: name,
         branch,
@@ -99,11 +105,11 @@ fn spawn(request: Request) -> Result<()> {
     let tmux = tmux::Server::app();
     let session = tmux.session(slot)?;
     let client = control::Client::attach(&tmux, &session, slot)?;
-    let pane = tmux.open_window(&session, &view.spawn)?;
+    let pane = tmux.open_window(&session, &entry.spawn)?;
     let grid = client.watch(&pane, slot);
     tmux.start(&pane, &recipe)?;
 
-    let snapshots = supervisor::watch(tmux, vec![Watched::new(view.spawn.clone(), pane.clone())]);
+    let snapshots = supervisor::watch(tmux, vec![Watched::new(entry.spawn.clone(), pane.clone())]);
 
-    app::run(&app::Spawn { view, pane, grid }, &snapshots, &client)
+    app::run(&app::Spawn { entry, pane, grid }, &snapshots, &client)
 }

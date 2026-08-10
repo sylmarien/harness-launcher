@@ -542,6 +542,24 @@ mod tests {
             .join("\n")
     }
 
+    /// A spawn that answers what it is told and is still running afterwards.
+    ///
+    /// **The `sleep` is load-bearing, and finding out why cost an afternoon of
+    /// a flaky test.** A pane whose process exits the instant it has written is
+    /// a pane whose last write tmux may never send a control client: the bytes
+    /// reach the pane's own screen — `capture-pane` shows them — but the
+    /// `%output` notification carrying them is dropped along with the pane's
+    /// closing file descriptor. It is a race, so it is intermittent, and under
+    /// load it was hit about half the time.
+    ///
+    /// Nothing about the app depends on that being fixed: a harness is a
+    /// long-running program, and the ladder in [`crate::snapshot`] is what
+    /// reports one that has stopped. What did depend on it was this test, which
+    /// was written to prove that typing arrives and was failing for a reason
+    /// that had nothing to do with typing. The two live tests either side of it
+    /// end in a sleep for the same reason.
+    const STILL_THERE_AFTERWARDS: &str = "read -r said; printf 'said %s\\n' \"$said\"; sleep 120";
+
     /// Wait for a grid to say something, or give up and show what it did say.
     fn until(grid: &Grid, wanted: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -609,10 +627,7 @@ mod tests {
         let pane = tmux.server.open_window(&session, "spawn").unwrap();
         let grid = client.watch(&pane, SLOT);
         tmux.server
-            .start(
-                &pane,
-                &tmux.recipe("read -r said; printf 'said %s\\n' \"$said\""),
-            )
+            .start(&pane, &tmux.recipe(STILL_THERE_AFTERWARDS))
             .unwrap();
 
         client.send(&pane, b"hello\r").unwrap();
