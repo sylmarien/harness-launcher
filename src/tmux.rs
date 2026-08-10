@@ -478,6 +478,77 @@ pub(crate) mod tests {
         );
     }
 
+    /// Several spawns at once, which is several windows and never several
+    /// sessions. There is no holding session and nothing is parked: a spawn is
+    /// a window of the one detached session from the moment it is made until it
+    /// stops, whether or not it is the one in the slot.
+    #[test]
+    fn several_spawns_are_several_windows_of_the_one_detached_session() {
+        let tmux = PrivateTmux::start("several-spawns-several-windows");
+        let session = tmux.server.session(SLOT).unwrap();
+
+        let one = tmux
+            .server
+            .open_window(&session, "add-retry-logic-a7f3")
+            .unwrap();
+        let other = tmux
+            .server
+            .open_window(&session, "fix-the-flake-b2c9")
+            .unwrap();
+
+        assert_ne!(one, other, "two spawns were given the same pane");
+        let windows = tmux
+            .server
+            .run(&[
+                "list-windows",
+                "-t",
+                &session,
+                "-F",
+                "#{window_name} panes=#{window_panes}",
+            ])
+            .unwrap();
+        assert!(
+            windows.contains("add-retry-logic-a7f3 panes=1"),
+            "{windows}"
+        );
+        assert!(windows.contains("fix-the-flake-b2c9 panes=1"), "{windows}");
+        let sessions = tmux
+            .server
+            .run(&["list-sessions", "-F", "#{session_name}"])
+            .unwrap();
+        assert_eq!(
+            sessions, session,
+            "a second session appeared to hold the spawns that are not in the slot"
+        );
+    }
+
+    /// How the server the user is sitting in front of is left alone: every
+    /// command this module runs is addressed to a socket of the app's own.
+    ///
+    /// This is the whole of the mechanism, and it is worth pinning here rather
+    /// than only observing its effect. [`Server::run`] is the single road out
+    /// of this module, and it goes through [`Server::with_socket`] — so a
+    /// command that lost its `-L` would find whichever server `$TMUX` named,
+    /// which on a spawn's window is the user's own. There is no run of the
+    /// tests that could notice that, because a test's server is private for the
+    /// same reason.
+    #[test]
+    fn every_command_is_addressed_to_a_server_of_the_apps_own() {
+        let app = Server::app();
+
+        assert_eq!(app.socket(), SOCKET);
+        assert_eq!(
+            app.with_socket(&["list-panes", "-a"]),
+            ["-L", SOCKET, "list-panes", "-a"],
+            "a command went out without saying which server it was for"
+        );
+        assert_eq!(
+            app.with_socket::<String>(&[]),
+            ["-L", SOCKET],
+            "the socket is not the first thing every command says"
+        );
+    }
+
     #[test]
     fn a_spawn_runs_the_harness_where_and_how_the_recipe_said() {
         let tmux = PrivateTmux::start("spawn-runs-the-recipe");

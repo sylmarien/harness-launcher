@@ -635,6 +635,44 @@ mod tests {
         until(&grid, "said hello");
     }
 
+    /// What makes switching free, against a real tmux.
+    ///
+    /// Two spawns, one of them the app would be drawing and one it would not.
+    /// The one nobody is looking at is not parked, not paused and not caught up
+    /// with afterwards — it keeps running and its output keeps arriving, so its
+    /// grid is already current at the moment somebody selects it. The second
+    /// line it draws is the load-bearing one: it is written a second *after*
+    /// the other spawn's, which is time it spent off screen.
+    #[test]
+    fn a_spawn_the_slot_is_not_showing_keeps_working_and_keeps_arriving() {
+        let tmux = PrivateTmux::start("control-spawns-off-screen-keep-going");
+        let session = tmux.server.session(SLOT).unwrap();
+        let client = Client::attach(&tmux.server, &session, SLOT).unwrap();
+
+        let shown = tmux.server.open_window(&session, "shown").unwrap();
+        let off_screen = tmux.server.open_window(&session, "off-screen").unwrap();
+        let in_the_slot = client.watch(&shown, SLOT);
+        let nobody_is_looking = client.watch(&off_screen, SLOT);
+        tmux.server
+            .start(&shown, &tmux.recipe("printf 'in the slot\\n'; sleep 120"))
+            .unwrap();
+        tmux.server
+            .start(
+                &off_screen,
+                &tmux
+                    .recipe("printf 'started\\n'; sleep 1; printf 'and still going\\n'; sleep 120"),
+            )
+            .unwrap();
+
+        until(&in_the_slot, "in the slot");
+        until(&nobody_is_looking, "and still going");
+
+        assert!(
+            !tmux.server.panes().unwrap().get(&off_screen).unwrap().dead,
+            "the spawn nobody was looking at stopped"
+        );
+    }
+
     /// The sharpest risk the design names, and the reason it is not one.
     ///
     /// A program asks its terminal where the cursor is and waits for an answer.
@@ -664,12 +702,28 @@ mod tests {
         );
     }
 
+    /// One `refresh-client` for however many spawns there are.
+    ///
+    /// The windows a control client is not *displaying* are the interesting
+    /// ones: only one spawn is ever in the slot, so if a resize reached only
+    /// the displayed window, every other spawn would be drawing at the old
+    /// shape and would be clipped the moment somebody selected it. The app's
+    /// window changing size is one event about the app, not about any one
+    /// spawn, and this is what makes it land on all of them.
     #[test]
     fn resizing_the_slot_resizes_every_spawn_in_it() {
+        const SPAWNS: usize = 4;
+
         let tmux = PrivateTmux::start("control-resize-reaches-the-spawns");
         let session = tmux.server.session(SLOT).unwrap();
         let client = Client::attach(&tmux.server, &session, SLOT).unwrap();
-        let pane = tmux.server.open_window(&session, "spawn").unwrap();
+        let panes: Vec<String> = (0..SPAWNS)
+            .map(|which| {
+                tmux.server
+                    .open_window(&session, &format!("spawn-{which}"))
+                    .unwrap()
+            })
+            .collect();
 
         client
             .resize(Size {
@@ -679,7 +733,9 @@ mod tests {
             .unwrap();
 
         tmux.until("#{pane_id} #{pane_width}x#{pane_height}", |seen| {
-            seen.contains(&format!("{pane} 100x30"))
+            panes
+                .iter()
+                .all(|pane| seen.contains(&format!("{pane} 100x30")))
         });
     }
 
