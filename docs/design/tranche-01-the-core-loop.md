@@ -19,6 +19,18 @@ unbounded wishlist — what the tool should do when it is *done*, across all tra
 scope of this tranche — what is in and what is out. **This document is the design**:
 how the scope is met, and why each choice beat its alternatives.
 
+> **Revised 2026-08-10.** The load-bearing decision in §4.1 changed after the rejected
+> alternatives were prototyped: tmux no longer draws anything, and the app renders every
+> cell itself.
+>
+> **§§3, 4.1, 4.2, 4.4, 4.6, 4.8, 4.9, 8 and Appendix A reversed a decision**, and each
+> carries a note saying what it used to say. **§§2, 4.3, 4.5 and 5.3 were corrected for
+> consistency** — no decision changed there, but statements that only made sense under the
+> old mechanism did. Everything else stands as written.
+>
+> The scope in the tranche document is untouched: this is a different mechanism for the
+> same product.
+
 ---
 
 ## 1. What tranche 1 accomplishes
@@ -96,8 +108,9 @@ it cannot be swallowed by a text box and needs no verification. `--effort` accep
 exactly `low, medium, high, xhigh, max`; the tranche's "effort level" is a first-class
 flag rather than something invented here.
 
-**The app never types into a session.** After launch, your own keyboard is already on
-that pane. See §4.3 for why that is scope rather than architecture.
+**The app never types into a session.** It relays your keystrokes to the selected spawn
+and originates none of its own. See §4.3 for why that is scope rather than
+architecture.
 
 ### Watching work — the list
 
@@ -127,9 +140,16 @@ promoted to another status.
 
 ### Opening a spawn
 
-Selecting a spawn puts it in the **slot** — the pane beside the list — where you see
+Selecting a spawn puts it in the **slot** — the region beside the list — where you see
 the real Claude Code interface, byte for byte. You type into it, interrupt it, watch
-its sub-agents. It is the actual program, not a reconstruction.
+its sub-agents. It is the actual program, not a reconstruction: the app draws the
+screen, but every cell in it came from `claude`.
+
+**Two honest asterisks on "byte for byte"**, both consequences of §4.1 and both recorded
+rather than buried: the app does not implement **scrollback** (§4.6), and it does not
+implement **mouse forwarding**. A spawn is the real interface, live and interactive, but
+in tranche 1 it is a screenful of it. Nothing else about the promise is qualified —
+typing, interrupting, colour, sub-agent output and the spinner are all the real thing.
 
 **The list stays visible the entire time.**
 
@@ -138,10 +158,9 @@ its sub-agents. It is the actual program, not a reconstruction.
 Creating a spawn is not a modal dialog. Instructions can be long, and you must be able
 to leave a half-written draft, go deal with a spawn that stopped, and come back.
 
-So a **draft is a pane, exactly like a spawn**. It takes the slot when selected, parks
-when not, gets its own pinned row in the list, and survives being walked away from.
-**Several drafts can be in flight at once**, at no extra cost, because a parked draft is
-just a parked pane.
+So a **draft is a first-class row, exactly like a spawn**. It takes the slot when
+selected, sits quietly in the list when not, and survives being walked away from.
+**Several drafts can be in flight at once**, at no extra cost.
 
 The form asks *"which of these?"* rather than *"which effort level?"* — the choices are
 supplied by the harness, and where a harness offers none, the control is omitted
@@ -185,7 +204,7 @@ it finds and adopts none of them. Litter is accepted; *invisible* litter is not.
 
 ## 3. How it looks
 
-A single tmux window: the app's list pane on the left, the slot on the right.
+One screen, drawn end to end by the app: the list on the left, the slot on the right.
 
 ```
  SPAWNS                          │ ┌─ claude ─ fix-worktree-cleanup ─ harness-launcher
@@ -209,9 +228,16 @@ maximised window must not be a bigger frame around the same small layout. This i
 recorded as a constraint because the first layout prototype hardcoded its widths, which
 flattered every candidate equally and hid how narrow the list really is.
 
-**The separator is always tmux's.** Both a spawn and a draft occupy the slot as a tmux
-pane, so there is never a mode where the app draws its own divider and the two fail to
-match.
+**The separator is the app's, and there is only one renderer.** Everything on
+screen — the list, the slot, a draft, the contents of a spawn — is drawn by the app in one
+pass, so there is no mode in which two halves of the screen are drawn by different things
+and fail to line up.
+
+> **Revised 2026-08-10.** This previously read "the separator is always tmux's", and the
+> sketch above was a tmux window with two panes: the slot's header was tmux's pane border,
+> and the divider was tmux's. Both are now drawn by the app (§4.1). **The picture is
+> unchanged** — that is the point of recording it. What changed is who paints it, which
+> is invisible from the user's chair and decisive everywhere else in this document.
 
 Three layouts were built and compared side by side against a mock slot. The one chosen
 groups by repository. Rejected: a flat list sorted by attention (denser, but reads as an
@@ -225,46 +251,113 @@ Prototype: branch `prototype/list-pane-layouts`.
 
 ## 4. How it works
 
-### 4.1 The app drives tmux; it does not embed terminals
+### 4.1 tmux supervises; the app renders
 
 This is the load-bearing decision. Everything else assumes it.
 
-Three shapes were considered:
+> **Revised 2026-08-10.** This section originally chose **drive**: the app composes a
+> tmux layout and tmux draws the children. Prototyping the rejected alternatives
+> unseated it. The new choice is **supervise + render** — tmux still owns the processes,
+> but it draws nothing and the app draws everything. The reasoning that rejected *hand
+> off* is untouched; the reasoning that rejected *embed* turned out to rest on an
+> arithmetic that a later decision in this same document had already invalidated.
+> Recorded as a revision rather than a rewrite, because how the earlier conclusion was
+> reached matters.
+
+Four shapes:
 
 | | what it means | verdict |
 | --- | --- | --- |
-| **Embed** | the app owns a pty per spawn and renders it in its own pane | rejected |
 | **Hand off** | the app manages spawns; viewing one means leaving the app for tmux | rejected |
-| **Drive** | the app composes a tmux layout — list pane, slot pane | **chosen** |
+| **Drive** | the app composes a tmux layout — list pane, slot pane — and tmux draws | rejected; originally chosen |
+| **Own the pty** | the app spawns each harness on a pty of its own and renders it | rejected |
+| **Supervise + render** | tmux owns the processes headlessly; the app reads their output over control mode and draws every cell | **chosen** |
 
 **Hand-off dies on simultaneity.** It is what ccmanager and `claude attach` do, and it
-takes the list away.
+takes the list away. Unchanged, and the reason the product exists.
 
-**Embedding was rejected on cost.** Hosting a child terminal means owning a pty *and*
-a terminal emulator, and the research found that road well-trodden but sharp-edged. The
-specific stack examined was Rust's (`portable-pty` + `vt100` + `tui-term`), but the
-hazards are properties of the technique rather than of any one library, and any
-language's equivalent stack should be assumed to share them:
+**What unseated *drive*.** It works — that was verified, not assumed. What it costs is
+that every surface the user sees belongs to tmux, so the app has to arrange its product
+around a layout engine it does not control. Three consequences, which read as separate
+design problems until you notice they are one:
 
-- **The emulator must be able to answer the child.** Terminals reply to queries —
-  cursor-position reports among them, which Claude Code issues. An emulator with no
-  write-back path drops them silently.
-- **Resize is lossy**, and a common source of crashes at the boundary between wide
-  glyphs and narrow panes.
+- the slot is a tmux pane, so **a draft has to be a pane too** (§4.4) — which means a
+  process, which means a handover across a process boundary;
+- showing a spawn means **moving a pane into the slot**, which resizes the child and
+  forces a full repaint on every switch (§4.2);
+- **the app itself must run inside tmux**, and must detect and cope with whether it was
+  started inside a session or outside one.
+
+None of those is fatal on its own. Together they are a tax paid on every feature, in
+exchange for not writing a terminal emulator.
+
+**Owning the pty and supervising differ in exactly one thing: who holds the process.**
+Both make the app a terminal emulator; both give it the whole screen. Both were built,
+behind a single shared renderer, precisely so the comparison could not be confounded by
+rendering differences — and **they are indistinguishable to look at**. That is the
+finding: for rendering, control mode buys nothing over owning the pty.
+
+So the choice between them turns on one question — what happens to twenty agents
+mid-turn when the app exits. A pty the app owns dies with the app. A tmux pane does not.
+§2 already promises **quitting kills nothing**, and that promise is worth more than the
+control-mode machinery costs. tmux stays.
+
+**Worth naming: that argument leans on something the tranche defers.** "Surviving the app
+closing" is explicitly out of scope — the frozen scope says shutting everything down on
+exit "is acceptable here". So the deciding argument for tmux is a behaviour the tranche
+does not require. It still holds, for two reasons. First, *acceptable* is not *desirable*:
+killing twenty agents mid-turn is the most destructive thing this app could do, and
+choosing an architecture that makes it the default would be choosing the harm rather than
+tolerating it. Second, it is the difference between a later tranche being able to add
+recovery and there being nothing left to recover. But it is a scope-adjacent argument
+carrying an architectural decision, and that should be visible rather than smuggled.
+
+**tmux is a headless process supervisor.** It is never attached to the user's terminal,
+it draws nothing anyone sees, and its layout is not a layout — one session, one window
+per spawn, one pane per window, none of them visible. Its durable value is exactly one
+thing: **process lifetime independent of the app**.
+
+**tmux is not storage either.** The grids are the app's, held in memory. tmux's copy of a
+pane's screen is where the bytes come *from*, not where they live — which is why losing
+the app loses the display history (§4.9) even though the processes survive.
+
+**The app does not run inside tmux.** `$TMUX` detection, taking over the current window,
+and the two start-up modes are all gone. The app is an ordinary terminal program: run it
+anywhere, including inside tmux if that happens to be where you are, and it makes no
+difference to anything.
+
+**The cost is a terminal emulator, and it is real.** The four sharp edges the research
+found are now the app's to solve rather than tmux's:
+
+- **The emulator must be able to answer the child.** Terminals reply to queries — cursor
+  position among them, which Claude Code issues. An emulator with no write-back path
+  drops them silently. This is the sharpest of the four and **control mode does not
+  solve it**: the reply path exists (`send-keys -H`), but something still has to generate
+  the reply. Carried as a named risk in §5.3.
+- **Resize is lossy**, and a common source of crashes where wide glyphs meet narrow
+  panes.
 - **Mouse forwarding is a hand-written protocol bridge**, with several independent
   encodings to get wrong.
-- **Scrollback is the binding cost** — roughly **1.3 GB across twenty panes** at
-  generous history, because every pane holds a full grid. ccmanager's source shows the tax
-concretely — it resets kitty keyboard protocol, `modifyOtherKeys` and focus tracking so
-they do not leak between sessions.
+- **Scrollback is the app's problem**, and in tranche 1 the app does not implement it
+  (§4.6).
 
-**Driving tmux gets the technical wins without the exit.** The multiplexer owns the
-pty, so no terminal emulation is written: resize, mouse, scrollback, alternate screen
-and colour are its problem and are solved properly. What it does *not* inherit is
-hand-off's simplicity — driving is a live control relationship, not a one-way exec.
+**The arithmetic that killed embedding had expired before it was applied.** The figure
+was roughly **1.3 GB across twenty panes**, from every pane holding a full grid *plus a
+generous history*. But §4.6 forces the fullscreen renderer, which draws on the alternate
+screen — and the alternate screen accrues no scrollback. With zero history allocated a
+grid is on the order of **300 KB**, about **6 MB across twenty**. The number that decided
+the question had been invalidated by a decision taken later in the same design, and
+nobody went back. Recorded because every step was locally sound, which is what makes
+this class of error hard to see.
 
-**tmux only.** zellij is a maybe-someday and its pane model is **knowingly unverified**;
-if it differs in kind, that is a rewrite rather than a swap. Accepted deliberately.
+**And memory was never the deciding factor anyway.** Confirmed with the author: the
+machine this runs on has orders of magnitude more than either figure needs. The honest
+cost of embedding is the emulator's four edges, not its footprint.
+
+**tmux only.** zellij is a maybe-someday and its pane model is **knowingly unverified**.
+The supervise-only role makes this less binding than it was — the app now needs far less
+from the multiplexer than when it was also the layout engine — but it is a swap nobody
+has tested.
 
 **No dependency on Claude Code's own background-session daemon.** It exists — `claude
 agents`, `claude attach`, its own worktree management — and building on it was
@@ -272,35 +365,39 @@ considered. Rejected: it is Claude-Code-specific and would land on the wrong sid
 harness seam, it is a research preview, and it creates and cleans up worktrees itself,
 which collides head-on with the app owning worktrees.
 
-### 4.2 The slot, and the parking mechanism
+### 4.2 The slot
 
-One visible window. The list on the left; the slot on the right holds **one** spawn or
-draft. Everything else is **parked in a dedicated detached holding session** and moved
-in and out with `break-pane` / `join-pane`.
+The list on the left; the slot on the right holds **one** spawn or draft. Both are
+regions of the app's own screen, drawn in a single pass.
 
-Why a holding session rather than off-screen windows in your own session: it keeps the
-user's workspace unlittered when the app takes over an existing window, and it serves
-both start-up modes with one mechanism.
+> **Revised 2026-08-10.** This section formerly described **parking**: every spawn not in
+> the slot lived in a dedicated detached holding session, moved in and out with
+> `break-pane` / `join-pane`, with `$TMUX` choosing between two start-up modes. All of
+> that is gone — the mechanism, the holding session, and the mode detection. The research
+> behind it stands (parking does work detached, and it does force a structural resize);
+> it is simply no longer used.
 
-**Mode detection is `$TMUX`**: not already in tmux → start a session; already in tmux →
-take over the current window.
+**Switching is free.** Every spawn's screen lives in the app's memory as its own grid,
+kept current by the control-mode stream whether or not it is the one on display.
+Selecting another spawn is a re-render of a grid the app already holds: no pane moves,
+nothing is resized, no `SIGWINCH` reaches the child, nothing repaints.
 
-**Verified:** `break-pane` into a fully detached holding session works, preserving pane
-id, pid and scrollback. Tested on tmux 3.4.
+This is the substantive gain, and it is worth being precise about what was given up to
+get it. Parking's cost was structural — every park and unpark resized the pane and forced
+Claude Code to redraw, and every alternative tried (`window-size manual`, a same-sized
+holding session, `join-pane` rather than `break-pane`) still paid it. It was measured and
+judged acceptable, and it *was* acceptable: under the fullscreen renderer the redraw is
+clean. But "acceptable" is not "free", and this is what free looks like.
 
-**The cost, verified and accepted:** every park and unpark **resizes the pane and
-SIGWINCHes the child**, structurally — the parked window is created at the source
-window's size, and `window-size manual`, a same-sized holding session, and parking via
-`join-pane` instead were all tried and none avoids it. So every switch forces Claude
-Code to repaint.
+**Panes are still sized — just not by switching.** Each spawn's tmux pane is created at
+the slot's dimensions, because that is what the child renders into, and resized when the
+*app's* window changes size: one event affecting every spawn at once, never one caused by
+the user moving between them.
 
-**This was tested rather than argued.** Under the **fullscreen renderer, switching
-renders perfectly** — no flicker, no tearing, no lost content. Under the **classic
-renderer there is visible artifacting**. Prototype: `prototype/redraw-switch`.
-
-That is why §4.6 makes fullscreen a requirement rather than a preference. Note also that
-**no comparable project has ever paid this cost**, because none keeps the list visible —
-there was no outside evidence, and testing was the only way to know.
+**Every spawn is live, not only the visible one.** A parked pane was live too, so that is
+not new. What is new is that its output reaches the app continuously instead of sitting
+in tmux until unparked — which is what makes switching instant, and why the reader thread
+in §4.8 carries every pane rather than one.
 
 ### 4.3 The harness seam — a place, not an abstraction
 
@@ -330,7 +427,8 @@ launch_recipe(spec)      -> { program, args, env, cwd }   // the app runs it
 stop_plan()              -> { signal, timeout }           // the app sends it
 models()                 -> [{ id, label }]               // the app renders them
 effort_levels()          -> [{ id, label }]
-status_of(record)        -> Working | Stopped             // the app read the file
+status_source(pid)       -> path                          // the app reads it
+status_of(record)        -> Working | Stopped             // the module translates
 
 // designed-for, unimplemented in tranche 1:
 keystrokes_for(text)     -> …
@@ -350,8 +448,9 @@ built. It reframes the seam usefully too: the question the module answers is *"w
 this harness let you choose?"*, not *"what flags does this harness take?"* — the first
 survives a harness configured by a file, the second does not.
 
-**The input hole is deliberate.** Tranche 1's app never sends input, but the vision's
-managing agent will. So *start a session* and *send input to a session* are separate
+**The input hole is deliberate.** Tranche 1's app relays your keystrokes to the selected
+spawn and **originates none of its own** — it never composes input on your behalf. That
+is the hole: the vision's managing agent will. So *start a session* and *send input to a session* are separate
 concepts even though only the first is implemented, and delivering work is **not**
 defined as "the prompt is a launch argument" — that is one implementation of *give this
 session some work*, already false for a second turn.
@@ -362,41 +461,41 @@ session some work*, already false for a second turn.
   environment variable, a status vocabulary, or a screen shape.
 - The module mentions neither tmux, nor the filesystem, nor processes.
 
-### 4.4 One binary, and drafts as panes
+### 4.4 Drafts
 
-The slot shows a spawn *or* a draft, but a process draws into one pane. So who draws the
-draft?
+A draft is a half-written spawn: a repository, a description, a model, an effort level,
+and however long it takes you to finish typing it.
 
-**Rejected:** the app's own pane expanding to full width and drawing both columns itself
-when no spawn is joined. It gives the app two rendering modes, and the separator between
-the columns would be *ours* in one mode and *tmux's* in the other — a permanent source of
-visual mismatch. It also makes multiple drafts a pile of app-side state.
+> **Revised 2026-08-10.** This section formerly read "One binary, and drafts as panes",
+> and made a draft a tmux pane running the same binary in a draft mode, handing over to
+> `claude` with an `exec` and a handover file the app polled. Under app-side rendering
+> the objection that forced that design does not exist, and the mechanism goes with it.
 
-**Chosen:** a draft is a tmux pane running **the same binary** in a draft mode. Not a
-second program — it shares the rendering code, the theme, and the choice lists, so a
-draft pane and the list pane cannot drift visually.
+**A draft is app-side state.** No pane, no process, no `exec` handover, no handover file,
+no second mode of the binary.
 
-**The draft does its own creation.** It resolves the default branch, creates the
-worktree, and starts the harness — because the draft pane is where progress has to be
-*visible*, and only the process doing the work can show it. This also puts the refusals
-where the user's typing already is.
+**The objection that forced drafts into panes has dissolved.** It was that an app-drawn
+draft would give the app two rendering modes — the divider between the columns would be
+the app's in one and tmux's in the other, a permanent source of visual mismatch. Under
+app-side rendering **everything on screen is the app's**, so there is only ever one
+renderer and nothing to mismatch.
 
-**The draft pane becomes the spawn pane.** Once the worktree exists, the draft `exec`s
-`claude` in place. The pane id never changes; the window is renamed. No pane to create,
-no dead pane, no flicker — and the draft sets the fullscreen environment itself.
+**Creation still shows its work, and still refuses in place.** The draft's row is where
+progress and errors land: intent before action, so a creation that dies half-way leaves a
+record of the worktree it made rather than a mystery. On success the row becomes a spawn
+row; **on failure it stays a draft with your text intact**, so "refuse rather than guess"
+never costs you the paragraph you just wrote. That behaviour is unchanged — only the thing
+doing the work moved, from a separate process into a short-lived worker (§4.8).
 
-**Handover is a file the app already polls**, read on the same tick that reads
-`list-panes` and status files. No socket, no protocol, no second event loop.
+**Several drafts in flight at once still costs nothing**, and costs less than it did: a
+list of records rather than a pile of parked panes.
 
-**Owning the process does not license being opaque.** The draft writes what it is doing
-as it does it — intent before action — so a draft that dies mid-creation leaves a record
-of the worktree it made rather than a mystery.
-
-**No lock.** A per-repository or global creation lock was considered and dropped: the
-collision it would prevent is already impossible, because names carry a random suffix
-and paths are never reused, and concurrent `worktree add` operations were verified to
-work. Worth noting the cost it would have carried — creation happens in draft processes,
-so any lock would have to be an **inter-process** lockfile, not an in-memory mutex.
+**No lock, and now no question of one.** A per-repository or global creation lock was
+already declined — the collision it would prevent is impossible, because names carry a
+random suffix and paths are never reused, and concurrent `git worktree add` was verified
+to work. What changed is that such a lock would no longer have had to be an
+**inter-process** lockfile, since creation now happens inside the app. The decision
+stands; the argument for it got cheaper.
 
 ### 4.5 Knowing what a spawn is doing
 
@@ -407,6 +506,19 @@ so any lock would have to be an **inter-process** lockfile, not an in-memory mut
 2. **If alive, read the session status file**, keyed by `pane_pid`. `busy` and `waiting`
    → **working**; `idle` and `shell` → **stopped**.
 3. **If alive but the file will not resolve** → **unknown**, after a grace period.
+
+**Output is not a status signal**, and the §4.1 revision does not change that. The app
+now sees every byte a spawn draws, and it is tempting to read the stream — but a busy
+agent and one waiting on a question both draw, and inferring the difference means
+pattern-matching one harness's screen, which is exactly the Claude-Code-shaped corner
+the seam exists to avoid. The ladder stands as written.
+
+**Where the file lives, and what its words mean, belong to the harness module.** The app
+does the reading — the module performs no I/O — but it is handed a path and handed back
+`Working` or `Stopped`, and never sees `idle`, `busy` or `waiting`. Getting this wrong
+would put a Claude-Code-specific path *and* a Claude-Code-specific vocabulary in the app,
+which is exactly what §4.3's first invariant forbids. The description below is of the
+module's knowledge, not the app's.
 
 **About that status file.** Claude Code writes `<config_dir>/sessions/<pid>.json` — its
 internal `concurrentSessions` registry, present since v2.1.139, **the same file that
@@ -429,7 +541,7 @@ briefly report `unknown` — the one status that is supposed to mean a real prob
 routinely.
 
 **Where the app must guess, it surfaces rather than hides.** A false *stopped* costs a
-glance — you open it, see it working, move on, and you were going to that pane anyway. A
+glance — you open it, see it working, move on, and you were going to that spawn anyway. A
 false *working* costs the product: a spawn waits for you and never appears in the set
 that needs you. **This is the inverse of firstmate's bias, deliberately** — their false
 negative launches a duplicate agent onto a live worktree and destroys work; ours only
@@ -443,26 +555,41 @@ undocumented status file ever disappears.
 ### 4.6 Rendering: fullscreen is required
 
 Claude Code has two renderers. **Fullscreen** draws on the alternate screen buffer, like
-`vim`. **Classic** writes into the terminal's native scrollback — which here means
-tmux's.
+`vim`. **Classic** writes into the terminal's native scrollback.
 
 **The app forces fullscreen.** Not inherited from the user's setting, which varies by
 when they first used Claude Code.
 
-Chosen originally for **memory**: tmux server RSS works out at roughly 216 MB across
-twenty panes on default scrollback, governed by the user's own `history-limit`, which
-people commonly set to 10k–50k. Under the classic renderer every spawn pours its
-transcript into that. Under fullscreen, panes hold a screen and not a history — which
-dissolves the question of whether the app should manage `history-limit` at all.
+> **Revised 2026-08-10.** The requirement survives the §4.1 change, but **both of its
+> original reasons are gone**. It was chosen for tmux server memory — irrelevant now that
+> the app holds the grids and tmux holds no history worth counting — and then reinforced
+> by the redraw test, which no longer applies because switching no longer resizes
+> anything. The new reasons are below. A requirement whose entire justification has
+> turned over is worth re-deriving rather than inheriting.
 
-Then testing found a **second, independent reason**: switching spawns artifacts under
-classic and is flawless under fullscreen (§4.2). So classic is **not a supported
-configuration**, and the constraint is load-bearing rather than tidy. It reads like an
-imposition on user preference until you know that.
+- **The grids the app holds are screens, not histories.** The same argument as before,
+  moved from tmux's memory into the app's: under fullscreen a spawn costs one screenful
+  of cells and nothing accumulates. This is what makes twenty embedded emulators cost
+  megabytes rather than gigabytes (§4.1).
+- **The alternate screen keeps the transcript out of a scrollback the app does not
+  implement.** Under classic, output scrolls off the top of the grid and — with no
+  app-side scrollback — is simply gone. Fullscreen is what makes "no scrollback" a
+  coherent position rather than data loss.
+- **Fullscreen under control mode is the configuration that was actually tested.**
+  `prototype/render-alternatives` puts Claude Code's fullscreen renderer through a
+  control-mode stream and a hand-written emulator, and it renders.
 
-**Accepted cost:** scrollback inside a spawn becomes Claude Code's business —
-`capture-pane` will not show history, and tmux-native scrollback search over a spawn's
-past output goes away.
+**A known unknown was closed rather than dissolved.** The earlier design avoided control
+mode partly because Claude Code's fullscreen renderer is documented as incompatible with
+**iTerm2's** tmux integration mode, and whether our own client would trip the same thing
+was untested. It does not: the prototype *is* a control-mode client, and the fullscreen
+renderer works through it. That incompatibility is about iTerm2's handling, not about
+control mode as a transport.
+
+**Accepted cost, and it is larger than it was:** scrollback inside a spawn is Claude
+Code's business entirely. `capture-pane` will not show history, tmux-native scrollback
+search over a spawn's past output is gone, and the app offers no substitute of its own.
+Scrolling past a screenful stays on the deliberately-open list (§5.3).
 
 ### 4.7 Worktrees, branches, and the dirty rule
 
@@ -528,40 +655,68 @@ anything.
 
 ### 4.8 Concurrency
 
-**There is no per-spawn task.** tmux owns the children and their output is never read.
-Twenty spawns are twenty *rows*, not twenty tasks. That collapses the requirement to
-three things: the UI stays responsive, a tick runs about five times a second, and
-occasionally something slow happens.
+**There is still no per-spawn task.** Twenty spawns are twenty *rows* and twenty grids,
+served by one reader — not twenty tasks. What changed with §4.1 is that output is now read
+at all.
 
 - **Main thread** — terminal, input, render.
-- **One supervisor thread** — ticks, builds an **immutable snapshot**, sends it down a
-  channel. The UI renders the latest snapshot received.
-- **Short-lived workers** for slow one-shots, reporting over the same channel.
+- **One reader thread** — a blocking read loop on the control-mode client, decoding
+  `%output` notifications and applying the bytes to the emulator that owns that pane.
+- **One supervisor thread** — ticks, builds an **immutable snapshot** of statuses, sends it
+  down a channel. The UI renders the latest snapshot received.
+- **Short-lived workers** for slow one-shots — worktree creation among them (§4.4) —
+  reporting over the same channel.
 
-**A blocking concurrency model, not an asynchronous one.** Asynchrony earns its keep
-multiplexing hundreds of simultaneous waits; this is one subprocess per tick and twenty
-file stats. Blocking calls on a couple of threads are exactly as fast here and far
-easier to read, and the arrangement — one producer of snapshots, one consumer that
-renders — maps onto the problem directly. Whatever the language, prefer its plainest
-concurrency primitive over its most powerful one.
+**A blocking concurrency model, not an asynchronous one.** Unchanged, and the reader
+strengthens the case rather than weakening it: asynchrony earns its keep multiplexing
+hundreds of simultaneous waits, and there is exactly **one** stream to read however many
+spawns exist. Whatever the language, prefer its plainest concurrency primitive over its
+most powerful one.
+
+**Both transports, each for what it is good at.**
+
+> **Revised 2026-08-10.** This section previously read "Plain per-command `tmux`. No
+> control mode." That is reversed for output and retained for everything else.
+
+- **Control mode carries output.** One client, attached once at start-up, running **inside
+  a pty of the app's own** — verified: on piped stdio tmux refuses outright with
+  `tcgetattr failed: Inappropriate ioctl for device`. **One client carries every pane in
+  the session**, including windows that are not visible, which is what makes a single
+  reader viable at all — verified on tmux 3.4, with pane ids `%0`…`%(n-1)` in creation
+  order on a fresh server.
+- **Per-command `tmux` carries facts and commands** — creating windows, sizing panes,
+  killing them, and the `list-panes -a -F` tick. Control mode still **cannot report
+  process death**, which was one of the original reasons to decline it; that reason was
+  correct and survives, so the status ladder (§4.5) still polls.
+- **Input goes back over the client**, as `send-keys -H`.
+
+**The single reader is untested at twenty, and that is the sharpest unknown the §4.1
+revision introduces.** One thread now decodes every byte that twenty fullscreen agents
+draw, and it is a serialisation point with no backpressure story: if decoding cannot keep
+up, output backs up in the control client's pipe and every spawn lags at once, not just
+the visible one. Nothing in §7 tested control mode past a handful of panes — the prototype
+says so itself. The mitigations if it bites are ordinary (decode off the read, one
+emulator per thread, or drop frames for spawns that are not on screen) and none of them
+changes the design, which is why this is recorded as a risk to measure during the
+walking skeleton rather than a decision to take now.
+
+**Screen priming is a genuine cost of control mode, not a wrinkle.** It streams only what
+is produced **while a client is attached** — attach after a child has already drawn itself
+and the grid stays permanently blank, with no catch-up short of priming from
+`capture-pane`. Tranche 1 sidesteps this rather than solving it: the app attaches before
+it starts anything, so nothing is ever running unobserved. A later tranche that recovers
+pre-existing spawns (§4.9) inherits the problem, and priming from `capture-pane` is the
+known answer. The prototype hit it head-on, and works around it by starting each pane with
+a holder process, attaching, and only then respawning with the real command.
 
 **A tick** is one `tmux list-panes -a -F` covering every spawn at once, plus a `stat` per
 live spawn read only when mtime moved, at roughly 200 ms. The `ps` foreground-process-
 group probe is a **tie-breaker**, not a per-tick cost.
 
-**Plain per-command `tmux`. No control mode.** Everything control mode offers had already
-been declined — we do not scrape panes, and the tick is polling by design — and it cannot
-report process death at all. Rejecting it also **dissolved a known unknown**: Claude
-Code's fullscreen renderer is documented as incompatible with iTerm2's tmux integration
-mode (`tmux -CC`), and whether our own control client would trip that was undocumented
-and untested. Never opening one means the question cannot arise.
-
-**Slow work shows on the draft row**, which is also the error surface. `git worktree add`
-takes seconds; pressing enter and getting silence would feel broken. On success the row
-becomes a spawn row; **on failure it stays a draft with your text intact**, so "refuse
-rather than guess" never costs you the paragraph you just wrote. Notably this needs **no
-fourth status** — "creating" is a state of a draft becoming a spawn, not a state of a
-spawn.
+**Slow work shows on the draft row**, which is also the error surface — the rule and its
+reasoning are in §4.4; what belongs here is only that `git worktree add` takes seconds, so
+it runs on a worker and not on the tick. Notably it needs **no fourth status**: "creating"
+is a state of a draft becoming a spawn, not a state of a spawn.
 
 ### 4.9 State, and what survives
 
@@ -573,16 +728,26 @@ The app holds:
 - **The spec** — repository, description, model, effort, name. The only thing that
   exists nowhere else once the process is running, and therefore the only thing the app
   truly owns.
-- **Handles** — pane id, pane pid, worktree path, branch, holding-session name. Facts
-  tmux and git already know, cached to avoid asking every tick.
+- **Handles** — window and pane id, pane pid, worktree path, branch. Facts tmux and git
+  already know, cached to avoid asking every tick.
 - **The last observed status**, purely so the list renders between ticks.
+- **A screen grid per spawn** — new with §4.1, and the one part of the world the app
+  cannot re-derive. tmux knows the child's *current* screen; the grid is what the app
+  has *observed*, accumulated from the control-mode stream since it attached. It is a
+  cache of bytes already seen, held in memory and written nowhere.
 
 **Identity is the random suffix, reused** — the same string that names the branch and the
 worktree. The on-disk artifacts therefore identify themselves, which is what lets the
 start-up report say something more useful than "there is stuff here".
 
-**Nothing is written to disk as persistence.** The draft handover file is a channel across
-a process boundary, not a record; stale ones are cleared at start-up.
+**Nothing is written to disk as persistence.** With drafts no longer running as separate
+processes (§4.4), the handover file that was the one exception is gone too.
+
+> **Revised 2026-08-10.** Two entries above changed with §4.1: the holding-session name
+> left the handle list along with parking, and the grids joined it. Recovery got
+> strictly harder in one respect — a recovered spawn's grid starts blank, because control
+> mode streams only what is produced while attached (§4.8). Priming from `capture-pane`
+> is the known answer, and it belongs to the tranche that does recovery.
 
 **Recovery is lossy, and that is accepted.** A future tranche can rediscover panes, pids,
 worktrees and branches from the world. It cannot rediscover the spec — though more comes
@@ -622,10 +787,21 @@ Not decided, and not oversights:
   where the exit message and start-up orphan report appear, are not.
 - **Configuration** — whether the app remembers anything between runs, and where. The
   worktree root is deliberately not configurable.
-- **Keybindings, and scrolling past a screenful** — including how the app and tmux share
-  the keyboard.
+- **Keybindings, and scrolling past a screenful** — specifically how the keyboard is
+  split between the app's own commands and the spawn in the slot. This previously read
+  "how the app and tmux share the keyboard", which §4.1 made meaningless: tmux is never
+  attached and holds no keyboard. The split is now entirely the app's to decide, which
+  makes it easier but no less undecided — and it is the mechanism behind two things the
+  scope explicitly asks for, *typing into a spawn's prompt* and *interrupting it*. Worth
+  knowing that it is the largest open item on this list.
 - **Distribution** — run from source, or something installable.
 - **Logging and diagnostics** — how the author debugs the app while twenty children run.
+- **Answering the child's terminal queries** — a **named risk** rather than a comfortable
+  omission, new with §4.1. An emulator with no write-back path silently drops
+  cursor-position reports and their kin, and Claude Code issues them. The transport back
+  exists (`send-keys -H` on the control client); what is undecided is which emulator
+  generates the replies, and what breaks if none does. Most likely thing to bite during
+  the walking skeleton, so it is the first thing to test against a real `claude`.
 
 The disposition that governs all of these: **get the app running.** Where simplicity now
 creates a problem later, that problem belongs to a later tranche — deliberately, not by
@@ -658,6 +834,13 @@ creating, failed — is a state of something else, and belongs on that thing.
 **Tranche 1's omissions are scope, not architecture.** Where a simplification would
 otherwise harden into an assumption, leave a designed-for hole.
 
+**A decision's reasons can expire before the decision does.** Embedding was rejected on
+an arithmetic that a later choice in this same document had already invalidated, and the
+fullscreen requirement outlived both of its original justifications. When a decision is
+reopened, re-derive its reasons rather than inheriting them — and when a revision lands,
+say what the section used to say, because the superseded reasoning is the part that
+would otherwise be silently reinvented.
+
 ---
 
 ## 7. Evidence
@@ -670,38 +853,59 @@ content.
 | --- | --- |
 | `research/claude-code-control` | Ten documented control surfaces for Claude Code; input is keystrokes with no stable contract; driving the TUI under a pty is undocumented |
 | `research/rust-tui-frameworks` | The terminal-UI library landscape **in Rust** — the one finding here that does not transfer; redo it for another language |
-| `research/embedded-child-tui` | The four sharp edges of pty embedding, and the ~1.3 GB scrollback arithmetic that killed it |
+| `research/embedded-child-tui` | The four sharp edges of pty embedding — still load-bearing, and now the app's own problem. Its ~1.3 GB scrollback arithmetic is **superseded**: it assumed a generous history per pane, which fullscreen removes (§4.1) |
 | `research/git-worktrees-from-rust` | ~30 experiments: the exact dirty check, the silent branch adoption, libgit2's missing worktree removal |
 | `research/driving-tmux-from-rust` | 92 verified claims on tmux 3.4: parking works detached; the structural resize; control mode's blind spots |
 | `research/prior-art` | firstmate, ccmanager and omnigent read from source — and the correction about the status file |
 | `prototype/list-pane-layouts` | Three layouts compared at honest density; layout C chosen; the slot model |
-| `prototype/redraw-switch` | The redraw verdict: perfect under fullscreen, artifacting under classic |
+| `prototype/redraw-switch` | The redraw verdict: perfect under fullscreen, artifacting under classic. Settled parking's cost; parking is now gone, and the fullscreen half of the verdict is what survives |
+| `prototype/render-alternatives` | The two rejected alternatives built behind **one shared renderer**: control mode and own-the-pty are indistinguishable to look at, so rendering cannot decide between them. Also: a control client needs a tty; one client carries every pane in a session; control mode streams only what is produced while attached |
 
 Most of this transfers. The tmux, git and Claude Code findings are properties of those
 tools, not of the language that drives them; the prototypes' verdicts are about what a
 terminal does. **Only the terminal-UI library survey is ecosystem-bound**, and would need
 redoing to build this elsewhere.
 
-**Two claims in the research were later corrected**, and both corrections are reflected
-above: that `claude agents --json` ruled out the whole status-file mechanism (the command
-cannot see interactive sessions; the file can), and that splitting the code into separate
-compilation units would enforce the harness module's no-I/O rule (it does not — a standard
-library is available unconditionally, so only *external* dependencies are gated).
+**Three claims in the research were later corrected**, and all three corrections are
+reflected above: that `claude agents --json` ruled out the whole status-file mechanism
+(the command cannot see interactive sessions; the file can); that splitting the code into
+separate compilation units would enforce the harness module's no-I/O rule (it does not —
+a standard library is available unconditionally, so only *external* dependencies are
+gated); and the ~1.3 GB scrollback figure, which was measured honestly but applied after
+the fullscreen decision had already removed the history it assumed (§4.1).
+
+**The pattern across all three is the same**, and it is worth naming: each was a correct
+finding that stopped being true of *our* situation, and none of them announced it. That
+is the argument for prototyping decisions that have already been made — which is what
+`prototype/render-alternatives` was, and it overturned the biggest one in the document.
 
 ---
 
 ## 8. Building it
 
 The design is sliced into implementation tickets **walking-skeleton first**: the first
-ticket goes end to end thinly — pick a repo, create a worktree, start `claude` in a pane
-joined to the slot, beside a list of one — and everything after widens a stripe that
-already works.
+ticket goes end to end thinly — pick a repo, create a worktree, start `claude` in a tmux
+pane, read its output over the control-mode client, and draw it in the slot beside a list
+of one — and everything after widens a stripe that already works.
+
+> **Revised 2026-08-10.** The skeleton got one segment longer and one segment shorter.
+> Longer: it now has to attach a control client and emulate a terminal before anything
+> appears on screen, and **the emulator is the riskiest thing in the tranche** (§5.3), so
+> the skeleton is where it should be proven. Shorter: no parking, no holding session, no
+> draft process, no handover file.
+>
+> **The skeleton was already built under the old mechanism**, and is on `main`. It walks
+> the whole path — worktree, branch, window, a live session in the slot — and everything
+> it proved about worktrees, branch naming, the harness seam and refusing before tmux is
+> involved is unaffected. What has to be rebuilt is the window: how the app gets a screen
+> and how the bytes reach it. That migration is tracked as its own piece of work rather
+> than folded silently into the next ticket.
 
 Seams decide **where code lives**; they are a poor guide to what a ticket *delivers*,
 because a ticket per seam means nothing runs until the last one lands.
 
-**Project shape.** One program, with the harness module in its own directory. Not a
-second program for drafts: the same binary in a different mode (§4.4).
+**Project shape.** One program, with the harness module in its own directory. Drafts are
+state inside it, not a second program and not a second mode (§4.4).
 
 **The two invariants must be mechanically checked**, whatever the language:
 
@@ -719,22 +923,35 @@ external dependency. Note that **splitting into separate compilation units does 
 itself enforce the rule**, since a standard library is always available; it gates
 *external* dependencies and makes the boundary visible, which is worth something else.
 
-**Dependencies** collapsed to almost nothing as decisions landed — no terminal emulation,
-no git library, no tmux library, no asynchronous runtime. What remains is **a terminal UI
-library and a JSON parser**. Most of the program is subprocess calls and pure functions,
-which is why so much of it is cheap to test.
+**Dependencies.** Still no git library, no tmux library, no asynchronous runtime; most of
+the program remains subprocess calls and pure functions, which is why so much of it is
+cheap to test. But **terminal emulation came back** with §4.1, and with it a pty — not for
+the children, which tmux owns, but for the control client, which refuses to run on piped
+stdio (§4.8). The list is now: **a terminal UI library, a terminal emulator, a pty
+library, and a JSON parser.**
+
+That is the price of the §4.1 change stated plainly. The emulator is not a small
+dependency dressed as a large one — it is the component that has to be right for the
+product to be usable at all, and §5.3 records the specific way it can be wrong.
 
 **Test seams, agreed before any test is written:**
 
 1. The harness module's interface — pure unit tests
 2. Snapshot building — pure, against **captured** tmux and status-file output
 3. Worktree operations — integration, real `git`, throwaway repositories
-4. tmux operations — integration, real tmux on a private `-L` socket
+4. tmux operations, **including the control-mode client** — integration, real tmux on a
+   private `-L` socket: attach, run something that draws, assert the bytes arrive tagged
+   with the right pane id
 5. UI rendering — pure: render into an off-screen buffer and assert on it, no terminal
+6. **Terminal emulation** — pure: feed *captured* child output into the emulator and
+   assert on the resulting grid. New with §4.1, and the seam most worth having, because
+   this is now the hardest thing the app does
 
 **Not tested, by agreement:** the visual feel of a redraw or a colour scheme — the
-prototypes covered that and it is a judgement, not an assertion; and the draft end-to-end
-launching a real `claude`, which costs tokens and needs auth.
+prototypes covered that and it is a judgement, not an assertion; and draft creation end
+to end launching a real `claude`, which costs tokens and needs auth. Note the tension
+with §5.3: emulator fidelity against a *real* `claude` is precisely what automated tests
+will not cover, so it stays a thing to sit down and look at.
 
 **No abstraction and no fake for tmux or git.** A second implementation existing only for tests
 would make the harness seam "real" on false pretences and would be the abstraction
@@ -747,6 +964,10 @@ hermetic — demonstrated, not assumed, by the git research and the redraw proto
 
 Everything above is language-agnostic. This is what was chosen for the build actually
 being done, and it is the only part to discard if this design is reused elsewhere.
+
+> **Revised 2026-08-10.** §4.1 put two crates back on this list that earlier revisions of
+> this document had struck off — a terminal emulator and a pty library — and re-justified
+> a third. Nothing here was removed.
 
 **Language: Rust.** Chosen partly for its own sake — this project doubles as the author's
 way of learning it. That shapes several calls: **favour idiomatic, well-trodden Rust over
@@ -775,11 +996,28 @@ exists. The two compose: the lint becomes usable *after* the split.
 ownership errors threads produce are the ones the book teaches you to read. The cost is
 that a good deal of copied-from example material assumes tokio and will need adapting.
 
-**Terminal UI: ratatui.** Re-chosen after the delegation decision removed its original
-deciding requirement (an embedded terminal). It still leads on documentation depth for a
-beginner, it does not own the event loop — which suits a blocking design — and
-recomputing layout from the real terminal every frame is its normal mode, which §3
-requires. Its `TestBackend` renders into a buffer, which is how test seam 5 is realised.
+**Terminal UI: ratatui.** Chosen for documentation depth at a beginner's level, for not
+owning the event loop — which suits a blocking design — and because recomputing layout
+from the real terminal every frame is its normal mode, which §3 requires. Its
+`TestBackend` renders into a buffer, which is how test seam 5 is realised. Its original
+deciding requirement was that it could host an embedded terminal; that requirement went
+away when the app delegated rendering to tmux, and **came back with the §4.1 revision** —
+so the crate is now chosen on every ground it was ever considered on.
+
+**Terminal emulation: `vt100`, drawn by hand into ratatui cells.** Back on the dependency
+list with §4.1. `tui-term` wraps `vt100` for exactly this and is the obvious convenience;
+the prototype deliberately drew the grid itself, to keep the experiment about the
+emulator's fidelity rather than a wrapper's version compatibility, and the same reasoning
+applies to the build until there is a reason to add the layer.
+
+**`vt100` has no write-back path**, which is precisely the gap §5.3 names. It is the
+first thing to test against a real `claude`, and the first reason to go looking at
+another crate. Recorded here rather than in the body because it is a property of this
+crate, not of the design.
+
+**The pty for the control client: `portable-pty`.** Not for the children — tmux owns
+those — but because a control-mode client refuses to run on piped stdio (§4.8). One pty
+for the whole app, not one per spawn.
 
 **Tooling:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, plus the
 two greps. The same set is what runs before a push.
