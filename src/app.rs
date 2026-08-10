@@ -1,36 +1,64 @@
-//! The list pane.
+//! The whole screen.
 //!
-//! One spawn, and it is already in the slot. What the row says about it is not
-//! static any more: the supervisor works out what every spawn is doing and
-//! sends a snapshot down a channel, and this draws the latest one it has been
-//! given. Nothing is shared between the two — a snapshot is built whole and
-//! handed over, so a row is never read while it is being written.
+//! The list on the left, the slot on the right, and the line between them — all
+//! of it drawn by the app in one pass. There is no mode in which two halves of
+//! the screen belong to different programs and fail to line up, because there is
+//! only one program drawing.
 //!
-//! Nothing here is a fixed size. Every dimension comes from the real pane on
-//! every frame, so a maximised terminal is a bigger layout rather than a bigger
-//! frame around a small one.
+//! What is in the slot is a spawn's own screen: a grid the control-mode client
+//! keeps current whether or not it is the one being shown, copied here cell by
+//! cell. Keystrokes go the other way. **The app types into a spawn only what the
+//! user typed** — it has no keyboard of its own beyond the one key that quits.
+//!
+//! Nothing here is a fixed size. Every dimension comes from the real terminal on
+//! every frame, so a maximised window is a bigger layout rather than a bigger
+//! frame around a small one — and the slot growing is what tells tmux to grow
+//! the panes behind it.
 
 use std::io;
+use std::sync::MutexGuard;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::Alignment;
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::terminal;
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use crate::control::{Client, Grid, POISONED};
 use crate::error::{Error, Result};
+use crate::keys::{self, Modes};
+use crate::screen::{Screen, Size};
 use crate::snapshot::{Row, Snapshot, Status};
 
 /// How long a frame waits for a keystroke before drawing itself again.
-const TICK: Duration = Duration::from_millis(200);
+///
+/// Short, because the slot is somebody else's screen now: what is on it changes
+/// without anyone touching a key, and a frame that waited for one would show a
+/// spawn thinking in steps.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// How much of the screen the list takes.
+///
+/// A share rather than a size, so a maximised window is not a bigger frame
+/// around the same small layout.
+const LIST_SHARE: u16 = 33;
+
+/// The key that quits.
+///
+/// A function key because every ordinary one belongs to the spawn: a digit is
+/// exactly what you need to send when a harness asks you to pick an option, and
+/// `q` is a letter somebody is in the middle of typing. This is the whole of the
+/// app's keyboard, and how the rest of it is divided is not settled yet.
+const QUIT: event::KeyCode = event::KeyCode::F(10);
 
 /// The colour reserved for the app failing to know something.
 const AMBER: Color = Color::Yellow;
 
-/// What the list pane has to say.
+/// What the list has to say about a spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
     /// The repository the spawn was started against.
@@ -43,29 +71,187 @@ pub struct View {
     pub worktree: String,
 }
 
-/// Draw the list until the user quits.
+/// A spawn, as the screen needs it: what to say about it, and what it drew.
+pub struct Spawn {
+    /// What the list says.
+    pub view: View,
+    /// The pane it runs in, which is where keystrokes are addressed.
+    pub pane: String,
+    /// Its screen.
+    pub grid: Grid,
+}
+
+impl Spawn {
+    /// Its screen, for as long as the caller holds this.
+    ///
+    /// Held for a copy and no longer: the reader thread is waiting on the same
+    /// lock with the next thing the spawn drew, so anything done under it is
+    /// done to every spawn at once.
+    fn screen(&self) -> MutexGuard<'_, Screen> {
+        self.grid.lock().expect(POISONED)
+    }
+
+    /// The shape its screen is in.
+    fn size(&self) -> Size {
+        self.screen().size()
+    }
+
+    /// Catch its screen up with the shape the slot has become.
+    fn resize(&self, slot: Size) {
+        self.screen().resize(slot);
+    }
+
+    /// The modes its screen has put the keyboard in.
+    fn modes(&self) -> Modes {
+        Modes {
+            application_cursor: self.screen().application_cursor(),
+        }
+    }
+}
+
+/// How big the slot is when the terminal is this big.
+///
+/// Asked before the screen is taken over, because the panes tmux opens have to
+/// be the shape of the region they will be drawn into — the app renders a
+/// spawn's screen at the size the spawn thinks it has, and a disagreement shows
+/// up as a child drawing off the edge.
+pub fn slot(terminal: Size) -> Size {
+    Size::of(regions(Rect::new(0, 0, terminal.columns, terminal.rows)).2)
+}
+
+/// How big the slot is on the terminal the app was started on.
+///
+/// The first thing that can refuse for a reason nothing else would catch: a
+/// terminal too small to hold a slot has nothing to start a spawn at, and being
+/// told so on a shell is better than a session opening at no size at all.
+pub fn slot_now() -> Result<Size> {
+    let (columns, rows) = terminal::size()
+        .map_err(|trouble| Error::new(format!("the app has to run on a terminal: {trouble}")))?;
+
+    let slot = slot(Size { columns, rows });
+    if slot.is_empty() {
+        return Err(Error::new(format!(
+            "this terminal is {columns} by {rows}, which leaves no room for a session beside \
+             the list — make the window bigger and run this again"
+        )));
+    }
+
+    Ok(slot)
+}
+
+/// Draw everything until the user quits.
 ///
 /// Snapshots are drained rather than queued: what the user wants to see is what
 /// is true now, so a frame that arrives behind several ticks skips them.
-pub fn run(view: &View, snapshots: &Receiver<Snapshot>) -> Result<()> {
+pub fn run(spawn: &Spawn, snapshots: &Receiver<Snapshot>, client: &Client) -> Result<()> {
     let mut latest = Snapshot::default();
+    let mut showing = spawn.size();
 
     ratatui::run(|terminal| -> io::Result<()> {
         loop {
             while let Ok(snapshot) = snapshots.try_recv() {
                 latest = snapshot;
             }
-            terminal.draw(|frame| render(frame, view, &latest))?;
-            if quit_requested()? {
-                return Ok(());
+
+            terminal.draw(|frame| render(frame, &spawn.view, &latest, &spawn.screen()))?;
+
+            // A client that has gone leaves every grid exactly as it was, which
+            // on screen is a session sitting there thinking. Asked here rather
+            // than only when something is typed, because the user has no reason
+            // to type at a spawn that looks busy.
+            client.listening().map_err(io::Error::other)?;
+
+            // The slot's shape is read off the frame that was just drawn rather
+            // than worked out again from the terminal, so what the child is told
+            // it has and what the app draws cannot come to differ.
+            let wanted = slot(Size::of(terminal.get_frame().area()));
+            if wanted != showing && !wanted.is_empty() {
+                // The grid first: the resize reaches the child as a redraw, and
+                // a grid still the old shape would clip it.
+                spawn.resize(wanted);
+                client.resize(wanted).map_err(io::Error::other)?;
+                showing = wanted;
+            }
+
+            match asked_for(spawn.modes())? {
+                Asked::Nothing => {}
+                Asked::Quit => return Ok(()),
+                Asked::Typed(bytes) => {
+                    client.send(&spawn.pane, &bytes).map_err(io::Error::other)?;
+                }
             }
         }
     })
-    .map_err(|error| Error::new(format!("the list pane stopped: {error}")))
+    .map_err(|error| Error::new(format!("the app stopped: {error}")))
+}
+
+/// What the user did with the keyboard.
+enum Asked {
+    /// Nothing, in the time a frame waits.
+    Nothing,
+    /// To leave — which kills nothing, and is the only key the app keeps.
+    Quit,
+    /// Something for the spawn, already in the bytes a terminal would send.
+    Typed(Vec<u8>),
+}
+
+/// Wait a frame's worth of time for the keyboard.
+fn asked_for(modes: Modes) -> io::Result<Asked> {
+    if !event::poll(FRAME)? {
+        return Ok(Asked::Nothing);
+    }
+
+    let Event::Key(key) = event::read()? else {
+        return Ok(Asked::Nothing);
+    };
+    // Terminals that report a key going back up send the same key twice, and a
+    // spawn would be typed into twice.
+    if key.kind != KeyEventKind::Press {
+        return Ok(Asked::Nothing);
+    }
+    if key.code == QUIT {
+        return Ok(Asked::Quit);
+    }
+
+    Ok(Asked::Typed(keys::typed(key, modes)))
+}
+
+/// How the screen is divided.
+///
+/// The list, the line, and the slot. The line is one cell because a line is one
+/// cell; everything else is a share of whatever the terminal turned out to be.
+fn regions(area: Rect) -> (Rect, Rect, Rect) {
+    let [list, separator, slot] = Layout::horizontal([
+        Constraint::Percentage(LIST_SHARE),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+
+    (list, separator, slot)
 }
 
 /// Paint one frame.
-pub fn render(frame: &mut Frame, view: &View, snapshot: &Snapshot) {
+pub fn render(frame: &mut Frame, view: &View, snapshot: &Snapshot, screen: &Screen) {
+    let (list, separator, slot) = regions(frame.area());
+
+    frame.render_widget(listed(view, snapshot), list);
+    frame.render_widget(Block::new().borders(Borders::LEFT), separator);
+    frame.render_widget(screen, slot);
+
+    // The cursor is the terminal's own, put where the spawn left it. Without
+    // this the app would have a screen that looks like a session and no sign of
+    // where what you type is going.
+    if let Some((column, row)) = screen.cursor()
+        && column < slot.width
+        && row < slot.height
+    {
+        frame.set_cursor_position((slot.x + column, slot.y + row));
+    }
+}
+
+/// The list, as one block of text.
+fn listed<'a>(view: &'a View, snapshot: &'a Snapshot) -> Paragraph<'a> {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let heading = Style::default().add_modifier(Modifier::BOLD);
     let spawn = snapshot.of(&view.spawn);
@@ -92,15 +278,12 @@ pub fn render(frame: &mut Frame, view: &View, snapshot: &Snapshot) {
             "the slot on the right is a real session — your keyboard is already on it",
             dim,
         ),
-        Line::styled("q here quits the app and leaves the session running", dim),
+        Line::styled("F10 quits the app and leaves the session running", dim),
     ]);
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false }),
-        frame.area(),
-    );
+    Paragraph::new(lines)
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: false })
 }
 
 /// The mark a status is carried by, and how the row reads in it.
@@ -120,23 +303,6 @@ fn shown_as(row: Option<&Row>) -> (&'static str, Style) {
         Some(Status::Unknown) => ("? ", Style::default().fg(AMBER)),
         None => ("  ", Style::default()),
     }
-}
-
-/// Whether the user asked to leave.
-fn quit_requested() -> io::Result<bool> {
-    if !event::poll(TICK)? {
-        return Ok(false);
-    }
-
-    let Event::Key(key) = event::read()? else {
-        return Ok(false);
-    };
-    if key.kind != KeyEventKind::Press {
-        return Ok(false);
-    }
-
-    Ok(matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)))
 }
 
 #[cfg(test)]
@@ -165,14 +331,28 @@ mod tests {
         }
     }
 
-    fn rendered(width: u16, height: u16) -> String {
-        drawn(width, height, &saying(Status::Working, None))
+    /// A spawn's screen with something recognisable on it.
+    fn drew(size: Size, what: &str) -> Screen {
+        let mut screen = Screen::new(size);
+        screen.apply(what.as_bytes());
+
+        screen
     }
 
-    fn drawn(width: u16, height: u16, snapshot: &Snapshot) -> String {
+    fn rendered(width: u16, height: u16) -> String {
+        drawn(width, height, &saying(Status::Working, None), "")
+    }
+
+    fn drawn(width: u16, height: u16, snapshot: &Snapshot, slot: &str) -> String {
+        let terminal = Size {
+            columns: width,
+            rows: height,
+        };
+        let screen = drew(slot_size(terminal), slot);
+
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| render(frame, &view(), snapshot))
+            .draw(|frame| render(frame, &view(), snapshot, &screen))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
@@ -186,9 +366,22 @@ mod tests {
             .join("\n")
     }
 
+    /// The slot's shape, which a spawn's grid is always in.
+    fn slot_size(terminal: Size) -> Size {
+        let size = slot(terminal);
+        if size.is_empty() {
+            Size {
+                columns: 1,
+                rows: 1,
+            }
+        } else {
+            size
+        }
+    }
+
     #[test]
     fn the_list_names_the_spawn_under_its_repository() {
-        let screen = rendered(40, 12);
+        let screen = rendered(90, 12);
 
         let repository = screen.find("harness-launcher").unwrap();
         let spawn = screen.find("add-retry-logic-a7f3").unwrap();
@@ -200,7 +393,7 @@ mod tests {
 
     #[test]
     fn the_list_says_what_the_app_created() {
-        let screen = rendered(60, 12);
+        let screen = rendered(160, 12);
 
         assert!(screen.contains("spawn/add-retry-logic-a7f3"), "{screen}");
         assert!(
@@ -210,26 +403,126 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_pane_wraps_rather_than_losing_the_text() {
-        let screen = rendered(24, 24);
+    fn a_narrow_list_wraps_rather_than_losing_the_text() {
+        let screen = rendered(72, 24);
 
         assert!(screen.contains("add-retry-logic-a7f3"), "{screen}");
         assert!(screen.contains("quits the app"), "{screen}");
     }
 
     #[test]
-    fn a_wide_pane_is_not_a_frame_around_a_narrow_one() {
-        let wide = rendered(120, 12);
+    fn a_wide_terminal_is_not_a_frame_around_a_narrow_one() {
+        let wide = rendered(200, 12);
 
-        let longest = wide.lines().map(str::trim_end).map(str::len).max().unwrap();
-        assert!(longest > 60, "the layout did not use the width:\n{wide}");
+        let list = wide
+            .lines()
+            .map(|line| line.split('│').next().unwrap_or_default().trim_end().len())
+            .max()
+            .unwrap();
+        assert!(list > 60, "the layout did not use the width:\n{wide}");
     }
 
     #[test]
-    fn a_pane_too_short_for_everything_still_draws() {
-        let screen = rendered(40, 3);
+    fn a_terminal_too_short_for_everything_still_draws() {
+        let screen = rendered(90, 3);
 
         assert!(screen.contains("SPAWNS"), "{screen}");
+    }
+
+    #[test]
+    fn the_spawns_own_screen_is_what_the_slot_shows() {
+        let screen = drawn(
+            90,
+            12,
+            &saying(Status::Working, None),
+            "⏺ I'll start by reading how retirement is wired.",
+        );
+
+        assert!(
+            screen.contains("I'll start by reading how retirement is wired."),
+            "the spawn's screen is not in the slot:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_list_and_the_slot_are_divided_by_a_line_the_app_draws() {
+        let screen = drawn(90, 12, &saying(Status::Working, None), "in the slot");
+
+        for line in screen.lines() {
+            let separator = line
+                .find('│')
+                .unwrap_or_else(|| panic!("a row of the screen has no separator on it:\n{screen}"));
+            let list = line[..separator].to_string();
+            assert!(
+                !list.contains("in the slot"),
+                "the slot spilled into the list:\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_slot_is_the_size_the_spawn_was_told_it_had() {
+        let terminal = Size {
+            columns: 120,
+            rows: 40,
+        };
+
+        let slot = slot(terminal);
+
+        assert_eq!(slot.rows, terminal.rows);
+        assert!(
+            slot.columns > terminal.columns / 2,
+            "the slot is not the larger half: {slot:?}"
+        );
+
+        let (list, separator, drawn) = regions(Rect::new(0, 0, terminal.columns, terminal.rows));
+        assert_eq!(
+            list.width + separator.width + drawn.width,
+            terminal.columns,
+            "the list, the separator and the slot do not add up to the terminal"
+        );
+        assert_eq!(
+            Size::of(drawn),
+            slot,
+            "the size a spawn is told it has is not the region it is drawn into"
+        );
+    }
+
+    #[test]
+    fn the_cursor_is_put_where_the_spawn_left_it() {
+        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
+        let size = slot(Size {
+            columns: 90,
+            rows: 12,
+        });
+        let screen = drew(size, "\x1b[3;7H");
+
+        let (_, _, slot) = regions(Rect::new(0, 0, 90, 12));
+        terminal
+            .draw(|frame| render(frame, &view(), &Snapshot::default(), &screen))
+            .unwrap();
+
+        assert!(terminal.backend().cursor_visible());
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            (slot.x + 6, slot.y + 2).into()
+        );
+    }
+
+    #[test]
+    fn a_spawn_that_hid_its_cursor_does_not_get_one_drawn_anyway() {
+        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
+        let size = slot(Size {
+            columns: 90,
+            rows: 12,
+        });
+        let screen = drew(size, "\x1b[?25l");
+
+        terminal
+            .draw(|frame| render(frame, &view(), &Snapshot::default(), &screen))
+            .unwrap();
+
+        assert!(!terminal.backend().cursor_visible());
     }
 
     /// The row the spawn is on, whatever else moved around it.
@@ -243,9 +536,14 @@ mod tests {
 
     #[test]
     fn each_status_is_a_mark_of_its_own_beside_the_spawn() {
-        let working = row(&drawn(60, 12, &saying(Status::Working, None)));
-        let stopped = row(&drawn(60, 12, &saying(Status::Stopped, None)));
-        let unknown = row(&drawn(60, 12, &saying(Status::Unknown, Some("no record"))));
+        let working = row(&drawn(90, 12, &saying(Status::Working, None), ""));
+        let stopped = row(&drawn(90, 12, &saying(Status::Stopped, None), ""));
+        let unknown = row(&drawn(
+            90,
+            12,
+            &saying(Status::Unknown, Some("no record")),
+            "",
+        ));
 
         assert!(working.contains('·'), "{working}");
         assert!(stopped.contains('●'), "{stopped}");
@@ -257,29 +555,31 @@ mod tests {
     #[test]
     fn a_spawn_the_app_cannot_tell_about_says_why_on_screen() {
         let screen = drawn(
-            60,
+            180,
             14,
             &saying(
                 Status::Unknown,
                 Some("its session record carries no status"),
             ),
+            "",
         );
 
         assert!(screen.contains("carries no status"), "{screen}");
     }
 
-    /// How many lines of the screen have anything on them.
+    /// How many rows of the list have anything on them.
     fn written(screen: &str) -> usize {
         screen
             .lines()
-            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| line.split('│').next())
+            .filter(|list| !list.trim().is_empty())
             .count()
     }
 
     #[test]
     fn a_reason_takes_a_line_only_when_there_is_something_to_explain() {
-        let explained = drawn(60, 14, &saying(Status::Unknown, Some("no record")));
-        let plain = drawn(60, 14, &saying(Status::Working, None));
+        let explained = drawn(180, 14, &saying(Status::Unknown, Some("no record")), "");
+        let plain = drawn(180, 14, &saying(Status::Working, None), "");
 
         assert_eq!(
             written(&explained),
@@ -290,7 +590,7 @@ mod tests {
 
     #[test]
     fn before_the_first_snapshot_the_row_claims_nothing() {
-        let screen = drawn(60, 12, &Snapshot::default());
+        let screen = drawn(90, 12, &Snapshot::default(), "");
         let row = row(&screen);
 
         assert!(!row.contains('·'), "{row}");
@@ -318,7 +618,7 @@ mod tests {
             Snapshot::default(),
         ]
         .iter()
-        .map(|snapshot| column_of(&row(&drawn(60, 12, snapshot)), "add-retry-logic-a7f3"))
+        .map(|snapshot| column_of(&row(&drawn(90, 12, snapshot, "")), "add-retry-logic-a7f3"))
         .collect();
 
         assert!(

@@ -88,9 +88,6 @@ pub fn usage() -> String {
     format!(
         "harness-launcher — start a coding session on a worktree of its own\n\
          \n\
-         run it from inside tmux: it composes a window around the session, and\n\
-         has to be a pane in that window itself.\n\
-         \n\
          usage:\n    \
              harness-launcher <repository> <work> [--model <id>] [--level <id>]\n\
          \n    \
@@ -100,7 +97,10 @@ pub fn usage() -> String {
          options:\n    \
              --model <id>  {}\n    \
              --level <id>  {}\n    \
-             -h, --help    show this\n",
+             -h, --help    show this\n\
+         \n\
+         everything you type goes to the session; F10 quits and leaves it\n\
+         running.\n",
         offer(&harness::models(), harness::default_model()),
         offer(&harness::effort_levels(), harness::default_effort_level()),
     )
@@ -253,7 +253,9 @@ mod tests {
     }
 
     #[test]
-    fn the_usage_text_says_where_the_app_has_to_run() {
-        assert!(usage().contains("tmux"), "{}", usage());
+    fn the_usage_text_says_how_to_leave() {
+        // The one key the app keeps for itself. Nothing else on the keyboard is
+        // the app's, so nothing else would tell you how to get out.
+        assert!(usage().contains("F10"), "{}", usage());
     }
 }
