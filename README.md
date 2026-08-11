@@ -5,7 +5,9 @@ choose — from one place, see at a glance which ones need you, and open one to
 answer. No worktree created by hand, no terminals to juggle.
 
 What is here today is **as many spawns as you ask for**, end to end, with a list
-beside them that says what each one is doing.
+beside them that says what each one is doing — and **more of them started from
+inside the app**, without leaving it or losing sight of the ones already
+running.
 
 **It is an ordinary terminal program.** Run it from a shell, or from inside tmux
 if that happens to be where you are; it makes no difference to anything.
@@ -26,10 +28,35 @@ without touching the network, creates a worktree on a branch of its own under an
 app-owned root, and starts the session in it. Then it draws the whole screen —
 the list on the left, one session in the slot on the right, and the line between
 them. Everything you type goes to the session in the slot, as if you had started
-it yourself. **F6 and F7 move the selection up and down the list, F10 quits** —
-and those three are the whole of the app's keyboard so far. How the keyboard is
-split between the app and the spawn is still an open question in the design;
-these three are what the list needs and nothing more is claimed.
+it yourself. **F6 and F7 move the selection up and down the list, F2 starts a
+draft, F5 makes that draft into a spawn, and F10 quits** — and those five are the
+whole of the app's keyboard so far. How the keyboard is split between the app and
+the spawn is still an open question in the design; these five are what the list
+and the form need, and nothing more is claimed.
+
+**Another spawn is composed in the same screen, and it is not a dialog.** `F2`
+starts a draft: a row of its own pinned above the repositories, and a form in the
+slot asking for a repository, the work, and whatever the harness offers — it asks
+*"which of these?"* and is never told what any of the answers mean. Walk away to
+a spawn that stopped and come back, and the text, the caret and the field the
+keyboard was in are exactly as you left them. Several drafts can be in flight at
+once.
+
+`F5` starts one, and **it says what it is about to do before it does it** — the
+repository read, the worktree made, the harness started — so a creation that dies
+half way leaves a record of the worktree it made rather than a mystery. The slow
+part runs on a thread of its own, so the screen keeps drawing and every other
+spawn keeps arriving. On success the draft's row makes way for an ordinary spawn
+row under its repository, and the new session is in the slot; **on failure it is
+a draft again, with every character of what you typed still there**, and the
+reason under the form. Its row says which of the three it is — `+` being
+written, `>` being made, `!` stopped — because the list is the only place a
+draft appears, and you may well be looking at something else while it happens.
+
+Several drafts can be started at once and none of them waits for another: names
+carry a random suffix, so no two ever ask for the same path, and a spawn's branch
+is created with `--no-track` so nothing writes to the repository's config for two
+of them to contend over.
 
 **Moving the selection is the whole of switching.** Every spawn's screen lives
 in the app's memory as its own grid, kept current by the control-mode stream

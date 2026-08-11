@@ -91,6 +91,45 @@ pub struct SpawnSpec {
     pub worktree: PathBuf,
 }
 
+/// The spec a set of answers describes.
+///
+/// Whatever asked the questions — a form in the app, or a command line — asked
+/// *"which of these?"* and was told nothing else, so what comes back is a bag
+/// of ids with no headings on it. This is where they become the harness's own
+/// vocabulary again: **each list recognises its own**, so the order the answers
+/// arrive in is not a contract, and a list dropped for having nothing in it
+/// leaves no hole to line up against.
+///
+/// Anything unanswered is what the harness would have picked itself. The caller
+/// cannot tell one list from another — that is the whole point of asking the
+/// question the way [`choices`] does — so it cannot be asked to check them
+/// either.
+///
+/// *Accepted cost, and it is this module's to keep true:* recognising an answer
+/// by looking for it means **an id offered under two headings would be
+/// ambiguous**, and the first list asked would win it. Nothing outside here can
+/// see that, let alone prevent it, so the rule lives with the lists: ids are
+/// unique across every list [`choices`] offers. A test below holds it.
+pub fn spec_from(name: String, work: String, worktree: PathBuf, answers: &[String]) -> SpawnSpec {
+    SpawnSpec {
+        name,
+        work,
+        model: picked(&models(), answers, default_model()),
+        effort: picked(&effort_levels(), answers, default_effort_level()),
+        worktree,
+    }
+}
+
+/// Whichever of these options was answered, or the one the harness would have
+/// picked in the absence of an answer.
+fn picked(offered: &[Choice], answers: &[String], default: Choice) -> String {
+    answers
+        .iter()
+        .find(|answer| offered.iter().any(|choice| choice.id == answer.as_str()))
+        .cloned()
+        .unwrap_or_else(|| default.id.to_string())
+}
+
 /// A process to start, described rather than started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRecipe {
@@ -426,6 +465,64 @@ mod tests {
             recipe.env,
             [("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string())]
         );
+    }
+
+    #[test]
+    fn answers_become_a_spec_whatever_order_they_arrive_in() {
+        let spec = spec_from(
+            "add-retry-logic-a7f3".to_string(),
+            "add retry logic to the client".to_string(),
+            PathBuf::from("/data/harness-launcher/worktrees/add-retry-logic-a7f3"),
+            &["max".to_string(), "haiku".to_string()],
+        );
+
+        assert_eq!(spec.model, "haiku");
+        assert_eq!(spec.effort, "max");
+    }
+
+    #[test]
+    fn an_unanswered_list_is_what_the_harness_would_have_picked() {
+        let spec = spec_from(
+            "add-retry-logic-a7f3".to_string(),
+            "add retry logic".to_string(),
+            PathBuf::from("/w/add-retry-logic-a7f3"),
+            &["haiku".to_string()],
+        );
+
+        assert_eq!(spec.model, "haiku");
+        assert_eq!(spec.effort, default_effort_level().id);
+    }
+
+    /// The rule that makes an anonymous answer resolvable at all: an id
+    /// belongs to exactly one of the lists this harness offers. Two lists
+    /// sharing one would make an answer ambiguous, and whichever list was asked
+    /// first would silently win it.
+    #[test]
+    fn no_id_is_offered_under_two_headings() {
+        let offered: Vec<&str> = choices()
+            .iter()
+            .flat_map(|choices| choices.options.iter().map(|choice| choice.id))
+            .collect();
+
+        let distinct: std::collections::HashSet<&str> = offered.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            offered.len(),
+            "an id is offered under more than one heading: {offered:?}"
+        );
+    }
+
+    #[test]
+    fn an_answer_this_harness_never_offered_leaves_its_own_default() {
+        let spec = spec_from(
+            "add-retry-logic-a7f3".to_string(),
+            "add retry logic".to_string(),
+            PathBuf::from("/w/add-retry-logic-a7f3"),
+            &["from-another-harness-entirely".to_string()],
+        );
+
+        assert_eq!(spec.model, default_model().id);
+        assert_eq!(spec.effort, default_effort_level().id);
     }
 
     #[test]

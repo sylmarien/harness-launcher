@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use crate::creation::Wanted;
 use crate::error::{Error, Result};
 use crate::harness::{self, Choice};
 
@@ -29,22 +30,9 @@ const SEPARATOR: &str = "--and";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
     /// Start a session on a worktree of its own, for each of these.
-    Spawn(Vec<Request>),
+    Spawn(Vec<Wanted>),
     /// Say how to use the app.
     Help,
-}
-
-/// Everything a person chose when starting a spawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Request {
-    /// The repository to work on — or any directory inside it.
-    pub repository: PathBuf,
-    /// The work to be done, in the user's own words.
-    pub work: String,
-    /// The id of a [`harness::models`] choice.
-    pub model: String,
-    /// The id of a [`harness::effort_levels`] choice.
-    pub effort: String,
 }
 
 /// Work out what the arguments asked for.
@@ -70,7 +58,7 @@ pub fn parse(arguments: Vec<String>) -> Result<Invocation> {
 /// What one group of arguments asked for.
 enum Asked {
     /// One spawn, with the choices that group made.
-    Spawn(Request),
+    Spawn(Wanted),
     /// The usage text, which any group can ask for and which answers the lot.
     Help,
 }
@@ -111,16 +99,23 @@ fn asked_for(group: &[String]) -> Result<Asked> {
         }
     };
 
-    Ok(Asked::Spawn(Request {
+    // The two flags are named here and anonymous from here on: what the rest of
+    // the app carries is the ids that were picked, in the order the harness
+    // offers its lists, and the harness recognises its own when handed them
+    // back. That is the same thing a form hands over, which is what makes one
+    // spawn out of two roads.
+    Ok(Asked::Spawn(Wanted {
         repository: PathBuf::from(repository),
         work,
-        model: chosen(model, "model", &harness::models(), harness::default_model())?,
-        effort: chosen(
-            effort,
-            "effort level",
-            &harness::effort_levels(),
-            harness::default_effort_level(),
-        )?,
+        answers: vec![
+            chosen(model, "model", &harness::models(), harness::default_model())?,
+            chosen(
+                effort,
+                "effort level",
+                &harness::effort_levels(),
+                harness::default_effort_level(),
+            )?,
+        ],
     }))
 }
 
@@ -209,19 +204,19 @@ mod tests {
         parse(all)
     }
 
-    fn spawns(arguments: &[&str]) -> Vec<Request> {
+    fn spawns(arguments: &[&str]) -> Vec<Wanted> {
         match parse_arguments(arguments).unwrap() {
-            Invocation::Spawn(requests) => requests,
+            Invocation::Spawn(wanted) => wanted,
             Invocation::Help => panic!("expected a spawn, got a request for the usage text"),
         }
     }
 
     /// The one spawn, for the tests that ask for exactly one.
-    fn spawn(arguments: &[&str]) -> Request {
-        let mut requests = spawns(arguments);
+    fn spawn(arguments: &[&str]) -> Wanted {
+        let mut wanted = spawns(arguments);
 
-        assert_eq!(requests.len(), 1, "expected one spawn: {requests:?}");
-        requests.remove(0)
+        assert_eq!(wanted.len(), 1, "expected one spawn: {wanted:?}");
+        wanted.remove(0)
     }
 
     #[test]
@@ -236,8 +231,13 @@ mod tests {
     fn unsaid_choices_fall_back_to_what_the_harness_would_pick() {
         let request = spawn(&["/code/project", "add retry logic"]);
 
-        assert_eq!(request.model, harness::default_model().id);
-        assert_eq!(request.effort, harness::default_effort_level().id);
+        assert_eq!(
+            request.answers,
+            [
+                harness::default_model().id,
+                harness::default_effort_level().id
+            ]
+        );
     }
 
     #[test]
@@ -251,8 +251,7 @@ mod tests {
             "max",
         ]);
 
-        assert_eq!(request.model, "haiku");
-        assert_eq!(request.effort, "max");
+        assert_eq!(request.answers, ["haiku", "max"]);
     }
 
     #[test]
@@ -320,10 +319,11 @@ mod tests {
             "max",
         ]);
 
-        assert_eq!(requests[0].model, "haiku");
-        assert_eq!(requests[0].effort, harness::default_effort_level().id);
-        assert_eq!(requests[1].model, harness::default_model().id);
-        assert_eq!(requests[1].effort, "max");
+        assert_eq!(
+            requests[0].answers,
+            ["haiku", harness::default_effort_level().id]
+        );
+        assert_eq!(requests[1].answers, [harness::default_model().id, "max"]);
     }
 
     #[test]

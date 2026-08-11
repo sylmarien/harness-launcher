@@ -8,13 +8,20 @@
 //! What is in the slot is a spawn's own screen: a grid the control-mode client
 //! keeps current whether or not it is the one being shown, copied here cell by
 //! cell. Keystrokes go the other way. **The app types into a spawn only what the
-//! user typed** — it has no keyboard of its own beyond the four keys that leave,
-//! move the selection and start a draft.
+//! user typed** — it has no keyboard of its own beyond the five keys that leave,
+//! move the selection, start a draft and make one into a spawn.
 //!
 //! **Or the slot holds a draft**, which is a form the app draws and types into
 //! itself. That is the one place an ordinary key means something to the app
 //! rather than to a session, and which of the two it is comes from what the list
 //! is on — settled once a frame, like everything else about the slot.
+//!
+//! **A draft that is started becomes a spawn here.** The making is somebody
+//! else's ([`crate::creation`]); what this file owns is the moment it arrives:
+//! the spawn joins the list under the repository it was started against, the
+//! supervisor is told to watch it, the draft's row makes way, and the selection
+//! follows only if it was still on that draft. Everything slow about it happened
+//! on a thread, so no frame ever waits for a worktree.
 //!
 //! **Exactly one spawn is in the slot, and moving the selection changes which.**
 //! That is the whole of switching: nothing is moved, resized or told anything,
@@ -28,8 +35,9 @@
 //! the panes behind it.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::MutexGuard;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use ratatui::Frame;
@@ -39,12 +47,14 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Block, Borders};
 
 use crate::control::{Client, Grid, POISONED};
-use crate::draft::{Draft, Drafts, Edit};
+use crate::creation::{self, Report, Said, Started};
+use crate::draft::{self, Draft, Drafts, Edit};
 use crate::error::{Error, Result};
 use crate::keys::{self, Modes};
 use crate::list::{self, Cursor, Entry, Listing, Step};
 use crate::screen::{Screen, Size};
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, Watched};
+use crate::tmux::Server;
 
 /// How long a frame waits for a keystroke before drawing itself again.
 ///
@@ -79,6 +89,20 @@ const DOWN: event::KeyCode = event::KeyCode::F(7);
 /// away from the two that move, because starting a draft by mistyping a
 /// selection is a row appearing in the list nobody asked for.
 const COMPOSE: event::KeyCode = event::KeyCode::F(2);
+
+/// Make the draft in the slot into a spawn.
+///
+/// The fifth key, and the only one in the app that creates anything — a branch,
+/// a worktree and a session, none of which can be taken back with another
+/// keystroke. So it sits away from `F2`, which is otherwise the key a hand is
+/// coming from, and away from the two that move: the two mistypings that would
+/// cost something are *compose* becoming *start*, and a selection becoming one.
+///
+/// `Enter` was the other candidate and is worse. The form's own fields already
+/// give it two meanings — a line break in a paragraph, moving on from a path —
+/// and a third that creates a worktree would be settled by whichever control
+/// the keyboard happened to be in.
+const START: event::KeyCode = event::KeyCode::F(5);
 
 /// A spawn, as the screen needs it: what to say about it, and what it drew.
 pub struct Spawn {
@@ -150,11 +174,22 @@ impl Spawns {
 
     /// What the list says about all of them.
     ///
-    /// Taken once rather than every frame: what the list says about a spawn is
-    /// settled when it is created, and it is the snapshot beside it that
-    /// changes.
+    /// Taken when the set of spawns changes rather than every frame: what the
+    /// list says about a spawn is settled when it is created, and it is the
+    /// snapshot beside it that changes.
     pub fn entries(&self) -> Vec<Entry> {
         self.all.iter().map(|spawn| spawn.entry.clone()).collect()
+    }
+
+    /// Take a spawn that did not exist when the app started.
+    ///
+    /// At the end, which is where the list wants it: repositories keep the
+    /// order their first spawn arrived in, and within one the attention-first
+    /// order settles where a row sits. A spawn nothing is yet known about sorts
+    /// last of its group, which is exactly right for one that started a moment
+    /// ago.
+    fn add(&mut self, spawn: Spawn) {
+        self.all.push(spawn);
     }
 
     /// The spawn in the slot.
@@ -222,25 +257,52 @@ pub fn slot_now() -> Result<Size> {
     Ok(slot)
 }
 
+/// Everything outside the app's own screen that it can reach.
+///
+/// Gathered into one thing because they are one thing: the session the spawns
+/// are windows of, the client their output arrives down and keystrokes leave
+/// by, the supervisor's snapshots, and the way to tell it about a spawn that did
+/// not exist when it started. Making another spawn while the app runs needs all
+/// of them at once.
+pub struct World<'a> {
+    /// The tmux server the spawns live on.
+    pub server: &'a Server,
+    /// The session every spawn is a window of.
+    pub session: &'a str,
+    /// The client every spawn's output arrives down.
+    pub client: &'a Client,
+    /// What every spawn is doing, as of the supervisor's last tick.
+    pub snapshots: Receiver<Snapshot>,
+    /// How the supervisor is told to watch a spawn that has just been made.
+    pub arriving: Sender<Watched>,
+    /// Where the worktrees the app creates go. Resolved once, before the screen
+    /// was taken over, so a machine with nowhere to put them said so on a shell.
+    pub worktrees: PathBuf,
+}
+
 /// Draw everything until the user quits.
 ///
 /// Snapshots are drained rather than queued: what the user wants to see is what
-/// is true now, so a frame that arrives behind several ticks skips them.
-pub fn run(
-    spawns: &Spawns,
-    drafts: &mut Drafts,
-    snapshots: &Receiver<Snapshot>,
-    client: &Client,
-) -> Result<()> {
+/// is true now, so a frame that arrives behind several ticks skips them. What a
+/// creation has to say is drained rather than sampled, for the opposite reason:
+/// every line of it is a record of something that was about to happen, and a
+/// skipped one is a worktree nobody wrote down.
+pub fn run(held: &mut Held, world: &World) -> Result<()> {
     let mut latest = Snapshot::default();
-    let mut shape = spawns.shape();
-    let entries = spawns.entries();
-    let mut cursor = Cursor::on_spawn(&entries[0].spawn);
+    let mut shape = held.spawns.shape();
+    let (reporting, reports) = mpsc::channel();
 
     ratatui::run(|terminal| -> io::Result<()> {
         loop {
-            while let Ok(snapshot) = snapshots.try_recv() {
+            while let Ok(snapshot) = world.snapshots.try_recv() {
                 latest = snapshot;
+            }
+
+            // Before anything is drawn or borrowed, because this is the one
+            // thing in a frame that can add a spawn — and the list, the slot
+            // and the keyboard all have to be looking at the same set of them.
+            while let Ok(report) = reports.try_recv() {
+                reported(report, held, world, shape);
             }
 
             // What is in the slot is settled once, at the top of the frame. The
@@ -249,14 +311,14 @@ pub fn run(
             // draft — by construction; asking again further down would let a
             // selection that moved mid-frame send what was typed to the spawn
             // that left.
-            let showing = in_the_slot(spawns, drafts, &cursor);
+            let showing = in_the_slot(&held.spawns, &held.drafts, &held.cursor);
             let typing = showing.typing();
             // The pane's name rather than the pane, so that what is in the slot
             // is done being borrowed by the time an edit needs the drafts back.
             // A frame's worth of one short string, against a keystroke reaching
             // the wrong spawn.
             let addressed = showing.pane().map(str::to_string);
-            let listing = Listing::new(drafts.all(), &entries, &latest, &cursor);
+            let listing = Listing::new(held.drafts.all(), &held.entries, &latest, &held.cursor);
 
             terminal.draw(|frame| render(frame, listing, &showing))?;
 
@@ -264,7 +326,7 @@ pub fn run(
             // on screen is a session sitting there thinking. Asked here rather
             // than only when something is typed, because the user has no reason
             // to type at a spawn that looks busy.
-            client.listening().map_err(io::Error::other)?;
+            world.client.listening().map_err(io::Error::other)?;
 
             // The slot's shape is read off the frame that was just drawn rather
             // than worked out again from the terminal, so what the child is told
@@ -273,8 +335,8 @@ pub fn run(
             if wanted != shape && !wanted.is_empty() {
                 // The grids first: the resize reaches the children as a redraw,
                 // and a grid still the old shape would clip it.
-                spawns.resize(wanted);
-                client.resize(wanted).map_err(io::Error::other)?;
+                held.spawns.resize(wanted);
+                world.client.resize(wanted).map_err(io::Error::other)?;
                 shape = wanted;
             }
 
@@ -282,23 +344,135 @@ pub fn run(
                 Asked::Nothing => {}
                 Asked::Quit => return Ok(()),
                 Asked::Moved(step) => {
-                    cursor.moved(&list::order(drafts.all(), &entries, &latest), step);
+                    let order = list::order(held.drafts.all(), &held.entries, &latest);
+                    held.cursor.moved(&order, step);
                 }
-                Asked::Composed => cursor = Cursor::on_draft(drafts.start()),
+                Asked::Composed => held.cursor = Cursor::on_draft(held.drafts.start()),
+                Asked::Started => {
+                    // Only a draft can be started, and only what it says can
+                    // start it: a draft that has not said enough refuses on its
+                    // own row rather than here.
+                    if let Some(draft) = held.cursor.draft()
+                        && let Some(wanted) = held.drafts.submit(draft)
+                    {
+                        creation::making(draft, wanted, world.worktrees.clone(), reporting.clone());
+                    }
+                }
                 Asked::Edited(edit) => {
-                    if let Some(draft) = cursor.draft() {
-                        drafts.edit(draft, edit);
+                    if let Some(draft) = held.cursor.draft() {
+                        held.drafts.edit(draft, edit);
                     }
                 }
                 Asked::Typed(bytes) => {
                     if let Some(pane) = &addressed {
-                        client.send(pane, &bytes).map_err(io::Error::other)?;
+                        world.client.send(pane, &bytes).map_err(io::Error::other)?;
                     }
                 }
             }
         }
     })
     .map_err(|error| Error::new(format!("the app stopped: {error}")))
+}
+
+/// Do what one thing a creation said calls for.
+///
+/// Everything a creation has to say lands on the draft it is about, which is
+/// where it is read: the row in the list, and the form beside it. Only the last
+/// thing it says is ever anything else — a plan, which is the app's cue to open
+/// the window and start the harness.
+///
+/// **Starting the harness happens here rather than on the creation's own
+/// thread**, because it is tmux and the control client, and those belong to the
+/// thread that holds them. It is two commands to a server already running, so
+/// the frame it costs is a frame.
+fn reported(report: Report, held: &mut Held, world: &World, slot: Size) {
+    match report.said {
+        Said::Doing(step) => held.drafts.doing(report.draft, step),
+        Said::Refused(why) => held.drafts.failed(report.draft, why),
+        Said::Made(plan) => {
+            // Said before it is done, like everything a creation says: a
+            // harness that will not start leaves behind a draft that says the
+            // worktree was made and what was about to run in it.
+            held.drafts.doing(
+                report.draft,
+                format!("starting the harness in {}", plan.entry.worktree),
+            );
+
+            match creation::start(world.server, world.session, world.client, slot, *plan) {
+                Ok(started) => held.adopt(started, report.draft, &world.arriving),
+                // *Accepted cost:* the worktree and the branch stay. Removing a
+                // worktree is retirement's job and retirement is not built —
+                // and the design's rule about litter is that it must not be
+                // invisible, which the draft's own record makes it: it names
+                // what was made, and stays until somebody deals with it.
+                Err(refused) => held.drafts.failed(report.draft, refused.to_string()),
+            }
+        }
+    }
+}
+
+/// Everything the app itself is holding: the spawns, the drafts, and which row
+/// the list is on.
+///
+/// The other half of a frame is [`World`] — everything the app can reach outside
+/// its own screen. These two travel together through a frame because a frame is
+/// exactly one meeting of them, and they are separate because only one of them
+/// can be true without the app running.
+pub struct Held {
+    /// Every spawn there is.
+    spawns: Spawns,
+    /// Every draft being written or made.
+    drafts: Drafts,
+    /// Which row the list is on, and so what the slot holds.
+    cursor: Cursor,
+    /// What the list says about the spawns.
+    ///
+    /// Kept beside them rather than asked for every frame: what the list says
+    /// about a spawn is settled when it is created, and the only thing that can
+    /// change this is a spawn arriving — which is one place, below.
+    entries: Vec<Entry>,
+}
+
+impl Held {
+    /// What the app starts with: the spawns it was given, whatever drafts there
+    /// are, and the selection on the first spawn there is.
+    pub fn new(spawns: Spawns, drafts: Drafts) -> Self {
+        let entries = spawns.entries();
+        let cursor = Cursor::on_spawn(&entries[0].spawn);
+
+        Self {
+            spawns,
+            drafts,
+            cursor,
+            entries,
+        }
+    }
+
+    /// Take a spawn that has just started.
+    ///
+    /// The order is the order it has to be. The supervisor is told first, so the
+    /// tick that follows already knows about a spawn the list is about to draw;
+    /// the draft goes last, because until it does the row is the only thing
+    /// saying where this came from.
+    ///
+    /// **The selection follows the spawn only if it was still on the draft.**
+    /// Somebody who walked off to answer another spawn while this one was being
+    /// made asked to be there, and a creation finishing is no reason to move
+    /// them.
+    fn adopt(&mut self, started: Started, draft: draft::Id, arriving: &Sender<Watched>) {
+        let arrived = started.spawn.entry.spawn.clone();
+
+        // A supervisor that has gone means the app is on its way out, and a
+        // spawn it never hears about is a row with no status rather than a
+        // wrong one.
+        let _ = arriving.send(started.watched);
+        self.spawns.add(started.spawn);
+        self.entries = self.spawns.entries();
+        if self.cursor.draft() == Some(draft) {
+            self.cursor = Cursor::on_spawn(&arrived);
+        }
+        self.drafts.finished(draft);
+    }
 }
 
 /// What the slot is showing.
@@ -359,6 +533,8 @@ enum Asked {
     Moved(Step),
     /// To start a draft.
     Composed,
+    /// To make the draft in the slot into a spawn.
+    Started,
     /// Something for the draft in the slot.
     Edited(Edit),
     /// Something for the spawn, already in the bytes a terminal would send.
@@ -381,9 +557,14 @@ fn asked_for(typing: Typing) -> io::Result<Asked> {
 /// What one keystroke means.
 ///
 /// The whole of the split between the app's keyboard and whatever is in the
-/// slot, in one place and with nothing else in it: the four keys named here are
+/// slot, in one place and with nothing else in it: the five keys named here are
 /// the app's wherever the selection is, and everything else belongs to what the
 /// slot is holding — bytes for a session, an edit for a draft.
+///
+/// **The app's keys are the app's whatever is in the slot**, including the one
+/// that only ever does anything to a draft. A key that meant one thing over a
+/// form and went to the session otherwise would be a key nobody could learn: it
+/// would reach a spawn as a keystroke the moment the selection moved.
 fn what_it_means(key: KeyEvent, typing: Typing) -> Asked {
     // Terminals that report a key going back up send the same key twice, and a
     // spawn would be typed into twice.
@@ -394,6 +575,7 @@ fn what_it_means(key: KeyEvent, typing: Typing) -> Asked {
     match key.code {
         QUIT => Asked::Quit,
         COMPOSE => Asked::Composed,
+        START => Asked::Started,
         UP => Asked::Moved(Step::Up),
         DOWN => Asked::Moved(Step::Down),
         _ => match typing {
@@ -905,9 +1087,10 @@ mod tests {
     }
 
     #[test]
-    fn the_app_keeps_four_keys_and_the_spawn_gets_every_other() {
+    fn the_app_keeps_five_keys_and_the_spawn_gets_every_other() {
         assert!(matches!(pressed(QUIT), Asked::Quit));
         assert!(matches!(pressed(COMPOSE), Asked::Composed));
+        assert!(matches!(pressed(START), Asked::Started));
         assert!(matches!(pressed(UP), Asked::Moved(Step::Up)));
         assert!(matches!(pressed(DOWN), Asked::Moved(Step::Down)));
         assert!(matches!(pressed(KeyCode::Char('2')), Asked::Typed(bytes) if bytes == b"2"));
@@ -934,6 +1117,7 @@ mod tests {
             typed_at_a_draft(KeyCode::Backspace),
             Asked::Edited(Edit::Erased)
         ));
+        assert!(matches!(typed_at_a_draft(START), Asked::Started));
     }
 
     #[test]
@@ -1278,6 +1462,158 @@ mod tests {
         assert!(first.contains("  the first draft"), "{first}");
         assert!(!first.contains("  the second draft"), "{first}");
         assert!(second.contains("  the second draft"), "{second}");
+    }
+
+    // A draft becoming a spawn, which is the one thing that changes what the
+    // app is holding while it runs.
+
+    /// A spawn that has just been started, as the two views of it that arrive
+    /// together.
+    fn just_started(repository: &str, name: &str) -> Started {
+        let spawn = spawn_of(
+            repository,
+            name,
+            "%9",
+            slot(TERMINAL),
+            "the new spawn is talking",
+        );
+
+        Started {
+            watched: Watched::new(name.to_string(), spawn.pane.clone()),
+            spawn,
+        }
+    }
+
+    /// Everything the app is holding while a draft of this work is in flight,
+    /// and which draft that is.
+    fn about_to_arrive(work: &str) -> (Held, draft::Id) {
+        let held = Held::new(several(), drafting(&[work]));
+        let draft = held.drafts.all()[0].id();
+
+        (held, draft)
+    }
+
+    /// The whole screen, as this app is holding it.
+    fn on_screen(held: &Held) -> String {
+        with_drafts(&held.spawns, &held.drafts, &held.cursor)
+    }
+
+    #[test]
+    fn a_draft_that_started_becomes_a_spawn_row_in_its_repository_group() {
+        let (mut held, draft) = about_to_arrive("start the scheduler");
+        held.cursor = Cursor::on_draft(draft);
+        let (arriving, _arrivals) = mpsc::channel();
+
+        held.adopt(
+            just_started("harness-launcher", "start-the-scheduler-c8d2"),
+            draft,
+            &arriving,
+        );
+
+        assert!(
+            held.drafts.all().is_empty(),
+            "the draft's row is still there"
+        );
+        let screen = on_screen(&held);
+        let repository = screen.find("harness-launcher").unwrap();
+        let spawn = screen.find("start-the-scheduler-c8d2").unwrap();
+        assert!(
+            repository < spawn,
+            "the new spawn is not under the repository it was started against:\n{screen}"
+        );
+        assert!(
+            screen.contains("the new spawn is talking"),
+            "the spawn that just started is not in the slot:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_supervisor_is_told_to_watch_a_spawn_that_has_just_started() {
+        let (mut held, draft) = about_to_arrive("start the scheduler");
+        held.cursor = Cursor::on_draft(draft);
+        let (arriving, arrivals) = mpsc::channel();
+
+        held.adopt(
+            just_started("harness-launcher", "start-the-scheduler-c8d2"),
+            draft,
+            &arriving,
+        );
+
+        let watched = arrivals.try_recv().expect("the supervisor was not told");
+        assert_eq!(watched.name, "start-the-scheduler-c8d2");
+        assert_eq!(watched.pane, "%9");
+    }
+
+    /// A newly arrived spawn has a row before anything is known about it, and
+    /// that row claims nothing — the grace period the supervisor counts from
+    /// adoption is what keeps it from claiming the tooling is broken, and until
+    /// its first snapshot the list says nothing at all rather than `unknown`.
+    #[test]
+    fn a_spawn_that_has_just_arrived_does_not_claim_to_be_unaccounted_for() {
+        let (mut held, draft) = about_to_arrive("start the scheduler");
+        held.cursor = Cursor::on_draft(draft);
+        let (arriving, _arrivals) = mpsc::channel();
+
+        held.adopt(
+            just_started("harness-launcher", "start-the-scheduler-c8d2"),
+            draft,
+            &arriving,
+        );
+
+        let arrived = on_screen(&held)
+            .lines()
+            .find(|line| line.contains("start-the-scheduler-c8d2"))
+            .expect("the spawn that just started has no row")
+            .to_string();
+        assert!(
+            !arrived.contains('?'),
+            "a spawn that started a moment ago says the app cannot tell what it is doing: {arrived}"
+        );
+    }
+
+    /// Somebody who walked off to answer another spawn while this one was being
+    /// made asked to be there. A creation finishing is not a reason to move
+    /// them, and the slot is what would move.
+    #[test]
+    fn a_spawn_arriving_does_not_take_the_selection_off_what_it_was_on() {
+        let (mut held, draft) = about_to_arrive("start the scheduler");
+        held.cursor = Cursor::on_spawn("fix-the-flake-b2c9");
+        let (arriving, _arrivals) = mpsc::channel();
+
+        held.adopt(
+            just_started("harness-launcher", "start-the-scheduler-c8d2"),
+            draft,
+            &arriving,
+        );
+
+        assert_eq!(held.cursor.spawn(), Some("fix-the-flake-b2c9"));
+        let screen = on_screen(&held);
+        assert!(screen.contains("the second spawn is talking"), "{screen}");
+        assert!(
+            screen.contains("start-the-scheduler-c8d2"),
+            "the spawn that arrived is not in the list:\n{screen}"
+        );
+    }
+
+    /// What the list says about the spawns is kept beside them rather than
+    /// asked for every frame, so the one thing that can change it has to.
+    #[test]
+    fn a_spawn_arriving_is_in_what_the_list_is_drawn_from() {
+        let (mut held, draft) = about_to_arrive("start the scheduler");
+        let (arriving, _arrivals) = mpsc::channel();
+
+        held.adopt(
+            just_started("harness-launcher", "start-the-scheduler-c8d2"),
+            draft,
+            &arriving,
+        );
+
+        assert_eq!(held.entries, held.spawns.entries());
+        assert!(
+            held.entries
+                .iter()
+                .any(|entry| entry.spawn == "start-the-scheduler-c8d2")
+        );
     }
 
     #[test]

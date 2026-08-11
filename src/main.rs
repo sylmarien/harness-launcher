@@ -29,12 +29,18 @@
 //! row of its own pinned above the repositories, and a form in the slot asking
 //! for a repository, the work, and whatever the harness lets you choose. It is
 //! not a dialog — walk away to a spawn that stopped and come back, and it is
-//! where you left it. Several can be in flight at once. **Nothing is created
-//! from one yet**; that is the next piece of work.
+//! where you left it. Several can be in flight at once.
+//!
+//! **`F5` makes one into a spawn**, and it says what it is doing as it does it:
+//! the repository read, the worktree made, the harness started. On success the
+//! draft's row makes way for a spawn row under its repository, and the new
+//! session is in the slot. On failure it is a draft again, with the text exactly
+//! as it was and a record of what had already been made.
 
 mod app;
 mod cli;
 mod control;
+mod creation;
 mod draft;
 mod error;
 mod git;
@@ -50,14 +56,11 @@ mod supervisor;
 mod tmux;
 mod worktrees;
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::cli::{Invocation, Request};
+use crate::cli::Invocation;
+use crate::creation::{Plan, Wanted};
 use crate::error::{Error, Result};
-use crate::harness::LaunchRecipe;
-use crate::list::Entry;
-use crate::snapshot::Watched;
 
 fn main() -> ExitCode {
     match run() {
@@ -75,7 +78,7 @@ fn run() -> Result<()> {
             print!("{}", cli::usage());
             Ok(())
         }
-        Invocation::Spawn(requests) => spawn(requests),
+        Invocation::Spawn(wanted) => spawn(&wanted),
     }
 }
 
@@ -98,10 +101,18 @@ fn run() -> Result<()> {
 /// control-mode client streams only what is produced while it is attached, so a
 /// session that drew itself before anything was listening would leave a slot
 /// that stays blank for ever — and nothing about it would look like an error.
-fn spawn(requests: Vec<Request>) -> Result<()> {
+///
+/// After this the app makes spawns the other way, from a draft — the same plan,
+/// the same worktree, the same window, on a thread so the screen keeps drawing.
+/// What is different here is only that a refusal has a shell to land on.
+fn spawn(wanted: &[Wanted]) -> Result<()> {
     let slot = app::slot_now()?;
+    let worktrees = worktrees::root()?;
 
-    let plans: Vec<Plan> = requests.into_iter().map(plan).collect::<Result<_>>()?;
+    let plans: Vec<Plan> = wanted
+        .iter()
+        .map(|wanted| creation::plan(wanted, &worktrees))
+        .collect::<Result<_>>()?;
     create(&plans)?;
 
     let tmux = tmux::Server::app();
@@ -111,80 +122,27 @@ fn spawn(requests: Vec<Request>) -> Result<()> {
     let mut spawns = Vec::new();
     let mut watched = Vec::new();
     for plan in plans {
-        let pane = tmux.open_window(&session, &plan.entry.spawn)?;
-        let grid = client.watch(&pane, slot);
-        tmux.start(&pane, &plan.recipe)?;
+        let started = creation::start(&tmux, &session, &client, slot, plan)?;
 
-        watched.push(Watched::new(plan.entry.spawn.clone(), pane.clone()));
-        spawns.push(app::Spawn {
-            entry: plan.entry,
-            pane,
-            grid,
-        });
+        watched.push(started.watched);
+        spawns.push(started.spawn);
     }
 
-    let snapshots = supervisor::watch(tmux, watched);
-    let mut drafts = draft::Drafts::new(harness::choices());
-
-    app::run(&app::Spawns::new(spawns)?, &mut drafts, &snapshots, &client)
-}
-
-/// One spawn, worked out but not yet made.
-struct Plan {
-    /// The repository it was started against.
-    repository: git::Repository,
-    /// The commit its branch is cut from.
-    start_point: String,
-    /// Where its worktree is to go.
-    worktree: PathBuf,
-    /// How to start the harness in it.
-    recipe: LaunchRecipe,
-    /// What the list will say about it.
-    entry: Entry,
-}
-
-impl Plan {
-    /// Make the worktree it calls for, on a branch of its own.
-    fn create(&self) -> Result<()> {
-        git::add_worktree(
-            &self.repository,
-            &self.worktree,
-            &self.entry.branch,
-            &self.start_point,
-        )
-    }
-}
-
-/// Work out everything about a spawn that can be settled without creating it.
-fn plan(request: Request) -> Result<Plan> {
-    let repository = git::open(&request.repository)?;
-    let start_point = git::default_branch(&repository)?;
-
-    let name = names::spawn_name(&request.work, names::fresh_seed());
-    let branch = names::branch_name(&name);
-    let worktree = worktrees::prepare(&name)?;
-
-    let recipe = harness::launch_recipe(&harness::SpawnSpec {
-        name: name.clone(),
-        work: request.work,
-        model: request.model,
-        effort: request.effort,
-        worktree: worktree.clone(),
-    });
-    let entry = Entry {
-        repository: repository.name().to_string(),
-        spawn: name,
-        branch,
-        worktree: process::path_argument(&worktree)?.to_string(),
+    let watching = supervisor::watch(tmux.clone(), watched);
+    let world = app::World {
+        server: &tmux,
+        session: &session,
+        client: &client,
+        snapshots: watching.snapshots,
+        arriving: watching.arriving,
+        worktrees,
     };
+    let mut held = app::Held::new(
+        app::Spawns::new(spawns)?,
+        draft::Drafts::new(harness::choices()),
+    );
 
-    Ok(Plan {
-        repository,
-        start_point,
-        worktree,
-        recipe,
-        entry,
-    })
+    app::run(&mut held, &world)
 }
 
 /// Make every worktree the plans call for, in order.

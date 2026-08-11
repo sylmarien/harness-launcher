@@ -37,19 +37,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::draft::{self, Draft};
-use crate::scaffolding::{DIM, ELLIPSIS, HEADING, gutter};
-use crate::scaffolding::{Footer, elided, scroll_offset};
+use crate::scaffolding::{AMBER, DIM, ELLIPSIS, HEADING, gutter};
+use crate::scaffolding::{Footer, elided, scroll_offset, wrapped};
 use crate::snapshot::{Row, Snapshot, Status};
 
-/// The colour reserved for the app failing to know something.
-const AMBER: Color = Color::Yellow;
-
-/// The mark against a draft.
+/// The mark against a draft being written.
 ///
 /// Not one of the status marks, and deliberately unlike them: a draft has no
 /// agent, so nothing about it is working, stopped or unaccounted for. It reads
 /// as the one thing it is — something being made.
 const DRAFT: &str = "+";
+
+/// The mark against a draft that is being made into a spawn.
+const STARTING: &str = ">";
+
+/// The mark against a draft that was started and could not be.
+const STOPPED: &str = "!";
 
 /// How far a row's text sits from the left: the selection's gutter, the status
 /// mark, and the space between that and the name.
@@ -250,16 +253,32 @@ struct Rows {
 /// A draft's row: the gutter, its mark, and what it is called so far.
 ///
 /// One line and nothing under it, selected or not. There is nothing to say
-/// beneath it — a draft has made no branch and no worktree — and what it does
-/// have is in the slot beside it the moment it is selected.
+/// beneath it — a draft has made no branch and no worktree until it is started
+/// — and what it does have is in the slot beside it the moment it is selected.
+///
+/// **The mark is the one thing about it that moves**, and it moves through the
+/// three things a draft can be: being written, being made into a spawn, and
+/// stopped without becoming one. That is progress at the granularity a row has —
+/// *which* step a creation has reached is a sentence and lives in the form —
+/// and it is here because the list is the only place a draft appears at all.
+/// Somebody who started one and went off to answer a spawn would otherwise have
+/// nothing telling them it had finished, or stopped.
 fn drafted(draft: &Draft, on_it: bool, width: usize) -> Line<'static> {
+    let (mark, how_it_reads) = if draft.stopped() {
+        (STOPPED, HEADING.fg(AMBER))
+    } else if draft.starting() {
+        (STARTING, HEADING)
+    } else {
+        (DRAFT, HEADING)
+    };
+
     Line::from(vec![
         gutter(on_it),
-        Span::styled(DRAFT, HEADING),
+        Span::styled(mark, how_it_reads),
         Span::raw(" "),
         Span::styled(
             elided(&draft.title(), width.saturating_sub(INDENT)),
-            HEADING,
+            how_it_reads,
         ),
     ])
 }
@@ -514,32 +533,6 @@ fn shown_as(status: Option<Status>) -> Shown {
     };
 
     Shown { mark, how_it_reads }
-}
-
-/// `text`, broken across lines of at most `cells`, on the spaces in it.
-///
-/// For the one thing in the list that is prose rather than a name. A word too
-/// long for a line of its own is cut, which is the only way it ends.
-///
-/// A list with no room at all gets no lines rather than a blank one per word:
-/// they would show as nothing and still push the spawns under them down.
-fn wrapped(text: &str, cells: usize) -> Vec<String> {
-    if cells == 0 {
-        return Vec::new();
-    }
-    let mut lines: Vec<String> = Vec::new();
-
-    for word in text.split_whitespace() {
-        match lines.last_mut() {
-            Some(line) if line.chars().count() + 1 + word.chars().count() <= cells => {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => lines.push(elided(word, cells)),
-        }
-    }
-
-    lines
 }
 
 #[cfg(test)]
@@ -833,6 +826,58 @@ F10 quits — nothing is killed"
 
         assert!(screen.contains("▍+ the second"), "{screen}");
         assert!(screen.contains(" + the first"), "{screen}");
+    }
+
+    /// The row is where a draft says which of the three things it is, because
+    /// the list is the only place a draft appears at all — somebody who started
+    /// one and went off to answer a spawn is looking at the list, not at the
+    /// form beside it.
+    #[test]
+    fn a_drafts_row_says_whether_it_is_being_written_started_or_stopped() {
+        let mut drafts = drafting(&["being written", "being started", "stopped"]);
+        let started = drafts.all()[1].id();
+        let stopped = drafts.all()[2].id();
+        // The one being started says enough to be started; the one that stopped
+        // never said which repository, which is a refusal in place.
+        drafts.edit(started, draft::Edit::Previous);
+        for character in "/code/project".chars() {
+            drafts.edit(started, draft::Edit::Typed(character));
+        }
+        drafts.submit(started);
+        drafts.submit(stopped);
+
+        let screen = with_drafts(
+            30,
+            16,
+            drafts.all(),
+            &five(),
+            &saying(None),
+            &Cursor::default(),
+        );
+
+        assert!(screen.contains(" + being written"), "{screen}");
+        assert!(screen.contains(" > being started"), "{screen}");
+        assert!(screen.contains(" ! stopped"), "{screen}");
+    }
+
+    #[test]
+    fn a_draft_that_stopped_reads_as_something_needing_a_person() {
+        let mut drafts = drafting(&["fix the worktree cleanup"]);
+        let stopped = drafts.all()[0].id();
+        drafts.failed(stopped, "there is no such repository".to_string());
+        let painted = painted(
+            30,
+            14,
+            drafts.all(),
+            &five(),
+            &saying(None),
+            &Cursor::default(),
+        );
+
+        // The draft's own row is the first under the heading and the blank
+        // beneath it, and the mark sits after the selection's gutter.
+        assert_eq!(painted[(MARK, 2)].symbol(), "!");
+        assert_eq!(painted[(MARK, 2)].style().fg, Some(AMBER));
     }
 
     #[test]

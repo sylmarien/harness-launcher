@@ -35,6 +35,13 @@ pub const DIM: Style = Style::new().add_modifier(Modifier::DIM);
 /// something about the app rather than about a spawn.
 pub const SELECTION: Style = Style::new().fg(Color::Cyan);
 
+/// The colour reserved for the app admitting something: that it cannot tell
+/// what a spawn is doing, or that it could not do what it was asked.
+///
+/// One colour for both, because they are one thing from where the user sits —
+/// the app saying *this one is on you*. Two would be two things to learn.
+pub const AMBER: Color = Color::Yellow;
+
 /// The gutter at the front of a row or a heading: the mark when the keyboard is
 /// on it, and the space it would have taken when it is not.
 ///
@@ -89,6 +96,89 @@ pub fn scroll_offset(selected: Option<(usize, usize)>, height: usize) -> u16 {
     let offset = past.min(first);
 
     u16::try_from(offset).unwrap_or(u16::MAX)
+}
+
+/// `text`, broken across lines of at most `cells`, on the spaces in it.
+///
+/// For the two things the app writes that are prose rather than names: the
+/// sentence saying why a spawn is `unknown`, and the one saying why a draft
+/// could not be started. Both are sentences the app did not write itself — they
+/// carry git's words, or the harness's — and a sentence cut at twenty-seven
+/// columns says nothing. A word too long for a line of its own is cut, which is
+/// the only way it ends.
+///
+/// A column with no room at all gets no lines rather than a blank one per word:
+/// they would show as nothing and still push everything under them down.
+pub fn wrapped(text: &str, cells: usize) -> Vec<String> {
+    laid_out(text, cells, |word, cells| vec![elided(word, cells)])
+}
+
+/// `text`, broken across lines of at most `cells` — on its spaces where it can
+/// be, and through a word that does not fit where it cannot.
+///
+/// For the one thing the app writes that has to survive being written down: the
+/// record of what a creation was about to do, which names a worktree and a
+/// branch. Everything else the app cuts, it cuts because the rest of it is not
+/// worth a second row — but **a path cut with an ellipsis is a path you cannot
+/// go and look at**, and going and looking is the whole reason it is written
+/// down before it is made.
+pub fn broken(text: &str, cells: usize) -> Vec<String> {
+    laid_out(text, cells, pieces)
+}
+
+/// Words onto lines of at most `cells`, with `too_long` saying what becomes of
+/// one that will not fit on a line of its own.
+///
+/// That is the whole of the difference between the two above, and the reason
+/// they are one function underneath: laying words onto lines is the same job
+/// either way, and written twice it would be two things that came to disagree
+/// about a space.
+fn laid_out(
+    text: &str,
+    cells: usize,
+    too_long: impl Fn(&str, usize) -> Vec<String>,
+) -> Vec<String> {
+    if cells == 0 {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = Vec::new();
+
+    for word in text.split_whitespace() {
+        for (at, piece) in whole(word, cells, &too_long).into_iter().enumerate() {
+            match lines.last_mut() {
+                Some(line)
+                    if at == 0 && line.chars().count() + 1 + piece.chars().count() <= cells =>
+                {
+                    line.push(' ');
+                    line.push_str(&piece);
+                }
+                _ => lines.push(piece),
+            }
+        }
+    }
+
+    lines
+}
+
+/// One word, as the pieces it goes onto lines as: itself when it fits, and
+/// whatever the caller does with it when it does not.
+fn whole(word: &str, cells: usize, too_long: &impl Fn(&str, usize) -> Vec<String>) -> Vec<String> {
+    if word.chars().count() <= cells {
+        return vec![word.to_string()];
+    }
+
+    too_long(word, cells)
+}
+
+/// `word`, in pieces of at most `cells` characters — which is what a word too
+/// long for a line of its own becomes when none of it may be lost.
+fn pieces(word: &str, cells: usize) -> Vec<String> {
+    let characters: Vec<char> = word.chars().collect();
+
+    characters
+        .chunks(cells)
+        .map(|piece| piece.iter().collect())
+        .collect()
 }
 
 /// What the foot of a column says the keyboard does.
@@ -188,6 +278,47 @@ mod tests {
         // Four lines of selection in a column three high: the first line of it
         // is what has to be on screen.
         assert_eq!(scroll_offset(Some((5, 8)), 3), 5);
+    }
+
+    #[test]
+    fn prose_is_broken_on_its_spaces_rather_than_wherever_it_runs_out() {
+        assert_eq!(
+            wrapped("its session record carries no status", 14),
+            ["its session", "record carries", "no status"]
+        );
+    }
+
+    #[test]
+    fn a_word_too_long_for_a_line_of_its_own_is_cut() {
+        assert_eq!(wrapped("/data/harness-launcher/worktrees", 8), ["/data/h…"]);
+    }
+
+    #[test]
+    fn prose_with_no_room_at_all_takes_no_rows_rather_than_blank_ones() {
+        assert!(wrapped("nothing fits here", 0).is_empty());
+        assert!(broken("nothing fits here", 0).is_empty());
+    }
+
+    #[test]
+    fn a_record_breaks_through_a_path_rather_than_losing_the_end_of_it() {
+        let record = broken("creating /data/harness-launcher/worktrees/a7f3", 20);
+
+        assert_eq!(
+            record,
+            ["creating", "/data/harness-launch", "er/worktrees/a7f3"]
+        );
+        assert!(
+            record.concat().contains("worktrees/a7f3"),
+            "the path did not survive being written down: {record:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_that_fits_reads_as_the_sentence_it_is() {
+        assert_eq!(
+            broken("creating the worktree /w/a7f3 on spawn/a7f3", 30),
+            ["creating the worktree /w/a7f3", "on spawn/a7f3"]
+        );
     }
 
     #[test]
