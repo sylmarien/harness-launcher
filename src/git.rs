@@ -135,6 +135,22 @@ pub fn default_branch(repository: &Repository) -> Result<String> {
 /// style one: without `-b`, git silently checks out a *pre-existing* branch of
 /// that name instead of creating one, which would drop a fresh agent onto
 /// somebody else's in-progress work.
+///
+/// **And always `--no-track`**, which is two rules in one flag. A spawn's branch
+/// starts *from* the default branch and is not a second copy of it: tracking
+/// would have `git status` in the worktree report the work as being up to date
+/// with `origin/main`, and `git pull` there merge main into it.
+///
+/// The other half is why it is here rather than a preference. Branching from a
+/// remote-tracking ref makes git write the upstream configuration into the
+/// repository's own `.git/config`, and **two spawns started at once against one
+/// repository then race for that file's lock** — one of them losing with
+/// `could not lock config file`, which is a refusal nobody can act on. The
+/// design declines a creation lock on the grounds that names carry a random
+/// suffix so nothing is ever contended; this is the one thing two creations
+/// really did contend for, and not writing it is what makes that true rather
+/// than nearly true. Found by the test below, which is the only reason it is
+/// known at all: it is a race, so it fails about one run in five.
 pub fn add_worktree(
     repository: &Repository,
     worktree: &Path,
@@ -148,6 +164,7 @@ pub fn add_worktree(
             path_argument(repository.path())?,
             "worktree",
             "add",
+            "--no-track",
             "-b",
             branch,
             path_argument(worktree)?,
@@ -336,6 +353,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(branch, "spawn/add-retry-logic-a7f3");
+    }
+
+    /// **What two spawns created at once really contend for**, stated as the
+    /// thing rather than as a consequence of it: creating a worktree does not
+    /// write the repository's own config, so there is no lock to lose.
+    ///
+    /// The branch not tracking anything is what makes that true today, and has
+    /// a test of its own below because it is worth keeping for its own sake.
+    /// This one is the guard: anything added to creation that writes config —
+    /// a `git config` call, a flag that sets one — puts the race back, and
+    /// would leave that test green while doing it.
+    #[test]
+    fn creating_a_worktree_does_not_write_the_repositorys_config() {
+        let root = repository_with_origin();
+        let repository = open(&root.path().join("project")).unwrap();
+        let config = repository.path().join(".git").join("config");
+        let before = fs::read(&config).unwrap();
+
+        add_worktree(
+            &repository,
+            &root.path().join("worktrees").join("add-retry-logic-a7f3"),
+            "spawn/add-retry-logic-a7f3",
+            "origin/main",
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(&config).unwrap(),
+            before,
+            "the repository's config was written, so two spawns created at once would \
+             contend for its lock and one of them would refuse"
+        );
+    }
+
+    /// A spawn's branch starts from the default branch without becoming a
+    /// second copy of it: tracking would have `git status` in the worktree
+    /// report the work as up to date with somebody else's branch, and `git
+    /// pull` there merge that branch into it.
+    #[test]
+    fn a_spawns_branch_does_not_track_the_branch_it_started_from() {
+        let root = repository_with_origin();
+        let repository = open(&root.path().join("project")).unwrap();
+        let worktree = root.path().join("worktrees").join("add-retry-logic-a7f3");
+
+        add_worktree(
+            &repository,
+            &worktree,
+            "spawn/add-retry-logic-a7f3",
+            "origin/main",
+        )
+        .unwrap();
+
+        let upstream = process::run(
+            "git",
+            &[
+                "-C",
+                worktree.to_str().unwrap(),
+                "rev-parse",
+                "--abbrev-ref",
+                "spawn/add-retry-logic-a7f3@{upstream}",
+            ],
+        )
+        .unwrap();
+        assert!(
+            !upstream.ok,
+            "the spawn's branch tracks {}, so its worktree reports the work as up to \
+             date with somebody else's branch",
+            upstream.stdout
+        );
     }
 
     #[test]

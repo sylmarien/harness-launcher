@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -34,23 +34,38 @@ use crate::tmux::{Pane, Server};
 /// enough that the cost is one subprocess five times a second.
 const TICK: Duration = Duration::from_millis(200);
 
+/// What the supervisor hands back: what it sees, and how to give it something
+/// more to look at.
+pub struct Watching {
+    /// What every spawn is doing, one snapshot per tick.
+    pub snapshots: Receiver<Snapshot>,
+    /// Spawns made since it started, which the next tick picks up.
+    pub arriving: Sender<Watched>,
+}
+
 /// Start watching, and hand back the snapshots.
 ///
 /// The supervisor owns everything it touches and shares nothing: each snapshot
-/// is built whole and moved down the channel, so the list pane can never read a
-/// row while it is being written. When the receiving end goes, so does the
-/// thread — there is nothing to look at any more.
-pub fn watch(server: Server, watched: Vec<Watched>) -> Receiver<Snapshot> {
+/// is built whole and moved down the channel, so the list can never read a row
+/// while it is being written. A spawn made while the app runs arrives the same
+/// way, in the other direction — moved in whole rather than shared, so there is
+/// still nothing two threads both hold. When the receiving end goes, so does the
+/// thread: there is nothing to look at any more.
+pub fn watch(server: Server, watched: Vec<Watched>) -> Watching {
     let (sending, snapshots) = mpsc::channel();
+    let (arriving, arrivals) = mpsc::channel();
 
     thread::spawn(move || {
-        let mut supervisor = Supervisor::new(server, watched);
+        let mut supervisor = Supervisor::new(server, watched, arrivals);
         while sending.send(supervisor.tick()).is_ok() {
             thread::sleep(TICK);
         }
     });
 
-    snapshots
+    Watching {
+        snapshots,
+        arriving,
+    }
 }
 
 /// One thread's worth of state: what to watch, and what it saw last time.
@@ -59,6 +74,8 @@ struct Supervisor {
     server: Server,
     /// The spawns being watched.
     watched: Vec<Watched>,
+    /// Spawns made since it started looking, waiting to be taken up.
+    arrivals: Receiver<Watched>,
     /// What the harness's records said.
     records: Records,
     /// What the tie-breaker found, for the spawns it has been run for.
@@ -66,10 +83,11 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    fn new(server: Server, watched: Vec<Watched>) -> Self {
+    fn new(server: Server, watched: Vec<Watched>, arrivals: Receiver<Watched>) -> Self {
         Self {
             server,
             watched,
+            arrivals,
             records: Records::new(),
             probes: Probes::default(),
         }
@@ -79,8 +97,16 @@ impl Supervisor {
     ///
     /// A tmux that will not answer is not a refusal: no panes is every spawn
     /// unaccounted for, which the ladder already has an honest answer for.
+    ///
+    /// **Spawns that have arrived are taken up first**, so one made a moment
+    /// ago is in this snapshot rather than the next: a row that appears in the
+    /// list and says nothing for a fifth of a second reads as the app
+    /// hesitating about something it just did itself.
     fn tick(&mut self) -> Snapshot {
         let at = Instant::now();
+        while let Ok(arrival) = self.arrivals.try_recv() {
+            self.watched.push(arrival);
+        }
         let panes = self.server.panes().unwrap_or_default();
 
         let mut evidence = HashMap::new();
@@ -312,6 +338,10 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
+    use crate::screen::Size;
+    use crate::snapshot::Status;
+    use crate::tmux::tests::PrivateTmux;
+
     /// Real `ps` output — see `captured/README.md`. In the first, the harness
     /// has gone and a stand-in holds the terminal; in the second it is there.
     const WITHOUT: &str = include_str!("../captured/ps-foreground.txt");
@@ -538,6 +568,53 @@ mod tests {
             probes.found["add-retry-logic-a7f3"].about, 9999,
             "an answer about a process that has gone was kept"
         );
+    }
+
+    /// A spawn made while the app runs is watched from the very next tick, and
+    /// **it does not spend that tick claiming the app is broken**: the grace
+    /// period counts from the moment it was adopted, so a session that has not
+    /// written a status yet reads as working rather than as unaccounted for.
+    ///
+    /// Against a real tmux, because what is being tested is the supervisor
+    /// finding a pane it was told about after it started looking.
+    #[test]
+    fn a_spawn_made_while_the_app_runs_is_watched_from_the_next_tick() {
+        let tmux = PrivateTmux::start("supervisor-adopts-a-new-spawn");
+        let session = tmux
+            .server
+            .session(Size {
+                columns: 40,
+                rows: 10,
+            })
+            .unwrap();
+        let watching = watch(tmux.server.clone(), Vec::new());
+        let pane = tmux
+            .server
+            .open_window(&session, "start-the-scheduler-c8d2")
+            .unwrap();
+
+        watching
+            .arriving
+            .send(Watched::new("start-the-scheduler-c8d2".to_string(), pane))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = watching.snapshots.recv().unwrap();
+            if let Some(row) = snapshot.of("start-the-scheduler-c8d2") {
+                assert_eq!(
+                    row.status,
+                    Status::Working,
+                    "a spawn adopted a moment ago: {row:?}"
+                );
+
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the supervisor never picked up the spawn it was told about"
+            );
+        }
     }
 
     #[test]

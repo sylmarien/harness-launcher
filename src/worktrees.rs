@@ -26,9 +26,12 @@ pub fn root() -> Result<PathBuf> {
 ///
 /// The directory itself is left for `git worktree add` to create: git refuses to
 /// use a path that already exists, and that refusal is worth keeping.
-pub fn prepare(spawn_name: &str) -> Result<PathBuf> {
-    let root = root()?;
-    fs::create_dir_all(&root).map_err(|error| {
+///
+/// The root is passed in rather than resolved here, because it is resolved once
+/// — before the screen is taken over, where a machine with nowhere to put
+/// worktrees can still be told so on a shell.
+pub fn prepare(root: &Path, spawn_name: &str) -> Result<PathBuf> {
+    fs::create_dir_all(root).map_err(|error| {
         Error::new(format!(
             "could not create the worktree root {}: {error}",
             root.display()
@@ -89,5 +92,20 @@ mod tests {
     #[test]
     fn with_nowhere_to_put_worktrees_the_app_refuses() {
         assert!(root_from(None, None).is_err());
+    }
+
+    #[test]
+    fn preparing_makes_the_root_and_leaves_the_worktree_itself_to_git() {
+        let somewhere = tempfile::tempdir().unwrap();
+        let root = somewhere.path().join("harness-launcher").join("worktrees");
+
+        let worktree = prepare(&root, "add-retry-logic-a7f3").unwrap();
+
+        assert!(root.is_dir(), "the root was not made");
+        assert_eq!(worktree, root.join("add-retry-logic-a7f3"));
+        assert!(
+            !worktree.exists(),
+            "the worktree's own directory was made, which git would refuse to use"
+        );
     }
 }

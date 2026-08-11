@@ -111,6 +111,12 @@ impl Panes {
 }
 
 /// A tmux server, and everything the app asks of one.
+///
+/// **Cloning one is free and means nothing more than a second thing addressing
+/// the same socket.** This is a name and a way of writing an argument list,
+/// never a connection — the supervisor's thread and the thread that makes
+/// spawns each hold one, and there is nothing between them to share.
+#[derive(Clone)]
 pub struct Server {
     /// The socket to talk over.
     socket: String,

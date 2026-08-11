@@ -18,9 +18,16 @@
 //! it is a control that does not exist, which is what lets a harness offering no
 //! such choice be a harness rather than a special case.
 //!
-//! **What is not here is creation.** A draft makes no worktree, no branch and no
-//! process; turning one into a spawn is its own piece of work. This is the form,
-//! and the text in it.
+//! **Starting one is the only thing in the app that creates anything.** The
+//! draft hands over what was typed and then narrates: what it is about to do
+//! before it does it, so a creation that dies half way leaves a record of the
+//! worktree it made rather than a mystery. On success the row goes and a spawn
+//! row takes its place; **on failure it is a draft again with the text
+//! untouched**, which is what makes *refuse rather than guess* affordable — a
+//! refusal never costs somebody the paragraph they just wrote. The making
+//! itself is [`crate::creation`]'s; what is here is the asking and the saying.
+
+use std::path::PathBuf;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -28,8 +35,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use crate::creation::Wanted;
 use crate::harness::{Choice, Choices};
-use crate::scaffolding::{self, Footer, scroll_offset};
+use crate::scaffolding::{self, AMBER, DIM, Footer, broken, scroll_offset};
 use crate::screen::Size;
 
 /// What the form calls itself, above everything it asks.
@@ -44,6 +52,22 @@ const REPOSITORY: &str = "Repository";
 /// What the heading over the description says.
 const WORK: &str = "Work";
 
+/// What the form calls the block a creation writes into.
+const STARTING: &str = "STARTING";
+
+/// What it calls that block once the creation has stopped without starting
+/// anything. A heading rather than only a colour: the difference between *this
+/// is happening* and *this did not happen* is the whole of what the block says.
+const NOT_STARTED: &str = "NOT STARTED";
+
+/// Why a draft with nothing in the repository field cannot be started.
+const MISSING_REPOSITORY: &str =
+    "it does not say which repository the work is for, and the app will not guess";
+
+/// Why a draft with nothing in the work field cannot be started.
+const MISSING_WORK: &str =
+    "it does not say what the work is, which is what a spawn is started with";
+
 /// How far a control's body sits from the left: one cell for the gutter the
 /// keyboard's mark goes in, and one more so the text sits inside its heading.
 const INDENT: usize = 2;
@@ -56,21 +80,32 @@ const PICKED: &str = "› ";
 
 /// What the foot of the form says the keyboard does.
 ///
-/// Both halves are worth saying. `Tab` is the only way around the form and
-/// nothing on screen implies it; and that the list's own keys still work is the
-/// promise the product rests on, where a full-height form is exactly the place
-/// somebody would assume they had been taken somewhere modal.
+/// All three are worth saying. `Tab` is the only way around the form and
+/// nothing on screen implies it; the key that starts it is the only thing in
+/// the app that creates anything, and there is nowhere else to learn it; and
+/// that the list's own keys still work is the promise the product rests on,
+/// where a full-height form is exactly the place somebody would assume they had
+/// been taken somewhere modal.
 ///
-/// The shortest form that can still spare it two rows is eight: below that
+/// The shortest form that can still spare it three rows is nine: below that
 /// there is not room for a heading, a field and a list of choices, which is the
 /// least of the form worth showing.
 const HINT: Footer = Footer::new(
     &[
         "Tab moves between fields",
+        "F5 starts it",
         "F6 / F7 leave it — nothing is lost",
     ],
-    8,
+    9,
 );
+
+/// What it says instead while the spawn is being made.
+///
+/// Nothing about moving around a form, because nothing typed into it would go
+/// anywhere: the text is being used. What is still true is the thing worth
+/// saying — walking away does not stop it, which is the same promise the list
+/// makes about quitting.
+const WHILE_STARTING: Footer = Footer::new(&["F6 / F7 leave it — it carries on"], 7);
 
 /// Which draft.
 ///
@@ -162,8 +197,50 @@ impl Drafts {
     /// what drafts exist are settled separately, so a keystroke aimed at one
     /// that has gone should do nothing rather than something.
     pub fn edit(&mut self, id: Id, edit: Edit) {
+        self.doing_to(id, |draft| draft.edited(edit));
+    }
+
+    /// Ask for a draft to be made into a spawn, and say what to make.
+    ///
+    /// Nothing at all when there is nothing to make: a draft already being made
+    /// is not started twice, and one that has not said enough refuses **in
+    /// place**, which is to say on its own row, with every character of what
+    /// was typed exactly where it was.
+    pub fn submit(&mut self, id: Id) -> Option<Wanted> {
+        self.all
+            .iter_mut()
+            .find(|draft| draft.id == id)
+            .and_then(Draft::submitted)
+    }
+
+    /// Write down what a creation is about to do, before it does it.
+    pub fn doing(&mut self, id: Id, step: String) {
+        self.doing_to(id, |draft| draft.doing(step));
+    }
+
+    /// Say that a creation stopped, and hand the draft back to the keyboard.
+    pub fn failed(&mut self, id: Id, why: String) {
+        self.doing_to(id, |draft| draft.failed(why));
+    }
+
+    /// Let go of a draft that has become a spawn.
+    ///
+    /// The row does not become the spawn's row so much as make way for it: the
+    /// spawn is listed under the repository it was started against, which is
+    /// somewhere a draft — which has not chosen one until it is typed — could
+    /// never have been.
+    pub fn finished(&mut self, id: Id) {
+        self.all.retain(|draft| draft.id != id);
+    }
+
+    /// Do something to one draft, if it is still here.
+    ///
+    /// Everything that happens to a draft after it is submitted arrives from
+    /// somewhere else — a thread, a frame later — so *the draft has gone* is an
+    /// ordinary thing for any of it to find, not an error.
+    fn doing_to(&mut self, id: Id, what: impl FnOnce(&mut Draft)) {
         if let Some(draft) = self.all.iter_mut().find(|draft| draft.id == id) {
-            draft.edited(edit);
+            what(draft);
         }
     }
 }
@@ -181,6 +258,45 @@ pub struct Draft {
     choices: Vec<Picked>,
     /// Which control the keyboard is in, counted the way [`control`] counts.
     on: usize,
+    /// What has happened since it was submitted, if it has been.
+    progress: Option<Progress>,
+}
+
+/// What a creation has said about a draft it was asked to make.
+///
+/// The three states of a draft are this field's three shapes, which is why it
+/// is one field rather than a flag and a list that could disagree: **nothing**
+/// is a draft being written, **something with no trouble in it** is one being
+/// made, and **something with trouble** is one that stopped and is being
+/// written again.
+struct Progress {
+    /// What has been done, or attempted — each line written before the step it
+    /// describes was tried.
+    steps: Vec<String>,
+    /// Why it stopped, when it did.
+    trouble: Option<String>,
+}
+
+impl Progress {
+    /// A creation that has just been asked for and has done nothing yet.
+    fn new() -> Self {
+        Self {
+            steps: Vec::new(),
+            trouble: None,
+        }
+    }
+
+    /// One that never started at all, and why.
+    ///
+    /// For what the form can settle itself — a draft that has not said which
+    /// repository, or what the work is. Nothing was attempted, so there is
+    /// nothing to record but the refusal.
+    fn refused(why: &str) -> Self {
+        Self {
+            steps: Vec::new(),
+            trouble: Some(why.to_string()),
+        }
+    }
 }
 
 impl Draft {
@@ -197,12 +313,86 @@ impl Draft {
             work: Text::paragraph(),
             choices: choices.iter().filter_map(Picked::of).collect(),
             on: 0,
+            progress: None,
         }
     }
 
     /// Which draft this is.
     pub fn id(&self) -> Id {
         self.id
+    }
+
+    /// Whether it was started and could not be.
+    ///
+    /// One of the two things the list draws its mark from — see [`Draft::
+    /// starting`] for why the list is told at all.
+    pub fn stopped(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(|progress| progress.trouble.is_some())
+    }
+
+    /// Whether a spawn is being made from it right now.
+    ///
+    /// Asked by everything that has to behave differently while it is: the form
+    /// draws its record, the keyboard is shut out of it, and the list's row
+    /// says so with a mark of its own. *What* the creation is doing is a
+    /// sentence and stays in the form; that it is happening at all is one
+    /// character, and one character is what a row has.
+    pub fn starting(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(|progress| progress.trouble.is_none())
+    }
+
+    /// Hand over what was typed, so a spawn can be made from it.
+    ///
+    /// The two fields are the two things nothing else can supply; the answers
+    /// go as the ids they came in as, because the form was never told what any
+    /// of them means and is not about to start pretending it knows.
+    fn submitted(&mut self) -> Option<Wanted> {
+        if self.starting() {
+            return None;
+        }
+
+        let repository = self.repository.text().trim().to_string();
+        let work = self.work.text().trim().to_string();
+        for (missing, why) in [
+            (repository.is_empty(), MISSING_REPOSITORY),
+            (work.is_empty(), MISSING_WORK),
+        ] {
+            if missing {
+                self.progress = Some(Progress::refused(why));
+
+                return None;
+            }
+        }
+
+        self.progress = Some(Progress::new());
+
+        Some(Wanted {
+            repository: PathBuf::from(repository),
+            work,
+            answers: self.choices.iter().map(Picked::answer).collect(),
+        })
+    }
+
+    /// Write down what the creation is about to do.
+    ///
+    /// Kept even once the next step is written: the whole point of saying it
+    /// beforehand is that what a creation *got as far as* survives it stopping.
+    fn doing(&mut self, step: String) {
+        if let Some(progress) = &mut self.progress {
+            progress.steps.push(step);
+        }
+    }
+
+    /// Say the creation stopped, and give the draft back to the keyboard.
+    fn failed(&mut self, why: String) {
+        match &mut self.progress {
+            Some(progress) => progress.trouble = Some(why),
+            None => self.progress = Some(Progress::refused(&why)),
+        }
     }
 
     /// What the list calls it: the first thing said about the work, or a
@@ -222,7 +412,16 @@ impl Draft {
     }
 
     /// Do what the keyboard asked.
+    ///
+    /// **Nothing at all while a spawn is being made from it.** The text has
+    /// left — it is a command line on its way to a session — so a character
+    /// typed into the form now would change what is on screen and nothing else,
+    /// which is the one thing a form must never do.
     fn edited(&mut self, edit: Edit) {
+        if self.starting() {
+            return;
+        }
+
         match edit {
             Edit::Next => self.on = (self.on + 1) % self.controls(),
             Edit::Previous => self.on = (self.on + self.controls() - 1) % self.controls(),
@@ -255,8 +454,16 @@ impl Draft {
     /// buffer, because where the caret goes falls out of the same arithmetic
     /// that wraps the text — and a caret worked out a second way would sit one
     /// cell from the character it belongs to on exactly the lines that wrapped.
+    ///
+    /// **What is kept in view differs by what the form is doing.** While a spawn
+    /// is being made, it is what the creation has said, because nothing else on
+    /// the form is going to change and that is the only thing worth a short
+    /// slot's rows. Once it is being written again — including after a creation
+    /// stopped — it is the control the keyboard is in, because a caret you
+    /// cannot see is worse than a reason you have to scroll to.
     pub fn form(&self, region: Size) -> Form {
-        let hint = HINT.rows(region.rows);
+        let footer = self.footer();
+        let hint = footer.rows(region.rows);
         let height = usize::from(region.rows.saturating_sub(hint));
         let width = usize::from(region.columns).saturating_sub(INDENT);
 
@@ -294,15 +501,82 @@ impl Draft {
             lines.push(Line::raw(""));
         }
 
+        if let Some(progress) = &self.progress {
+            let from = lines.len();
+            lines.extend(said(progress, width));
+            let last = lines.len() - 1;
+
+            showing = Some(match showing {
+                // Being written again, so the control the keyboard is in is what
+                // has to stay on screen — and what happened is reached for with
+                // whatever rows are left over, because a caret you cannot see is
+                // worse than a sentence you have to make room for.
+                Some((control, _)) if !self.starting() => (control, last),
+                _ => (from, last),
+            });
+        }
+
         let scroll = scroll_offset(showing, height);
 
         Form {
             lines,
             scroll,
+            footer,
             hint,
-            caret: caret.and_then(|(column, row)| on_region(column, row, scroll, region, height)),
+            // Nothing to type into while the spawn is being made, so nothing
+            // saying you can: a caret parked in a field the keyboard cannot
+            // reach is the form telling a lie about itself.
+            caret: (!self.starting())
+                .then(|| {
+                    caret.and_then(|(column, row)| on_region(column, row, scroll, region, height))
+                })
+                .flatten(),
         }
     }
+
+    /// What the foot of the form says, which depends on what it is doing.
+    fn footer(&self) -> &'static Footer {
+        if self.starting() {
+            &WHILE_STARTING
+        } else {
+            &HINT
+        }
+    }
+}
+
+/// What a creation has said, as the block the form ends in.
+///
+/// The heading says which of the two this is; under it the steps read as what
+/// they were written as — things about to be done — and then whatever stopped
+/// it.
+///
+/// **Both are broken across lines rather than cut**, which is the one place in
+/// the app text is not simply elided to the width it has. A step names a
+/// worktree and a branch and a refusal carries git's own words, which name
+/// paths too; a record you cannot read the end of is not a record of anything.
+fn said(progress: &Progress, width: usize) -> Vec<Line<'static>> {
+    let stopped = progress.trouble.is_some();
+    let mut lines = vec![Line::styled(
+        if stopped { NOT_STARTED } else { STARTING },
+        if stopped {
+            scaffolding::HEADING.fg(AMBER)
+        } else {
+            scaffolding::HEADING
+        },
+    )];
+
+    for step in &progress.steps {
+        lines.extend(broken(step, width).iter().map(|line| indented(line, DIM)));
+    }
+    if let Some(trouble) = &progress.trouble {
+        lines.extend(
+            broken(trouble, width)
+                .iter()
+                .map(|line| indented(line, DIM.fg(AMBER))),
+        );
+    }
+
+    lines
 }
 
 /// One text field: its heading, however many lines its text wrapped onto, and —
@@ -441,6 +715,11 @@ impl Picked {
         })
     }
 
+    /// What this list answers with, which is an id the form never reads.
+    fn answer(&self) -> String {
+        self.options[self.at].id.to_string()
+    }
+
     /// Do what the keyboard asked, and say whether the list was being finished
     /// with.
     ///
@@ -483,9 +762,11 @@ impl Picked {
 pub struct Form {
     /// Everything above the hint.
     lines: Vec<Line<'static>>,
-    /// How far down those lines sit, so the control the keyboard is in is on
+    /// How far down those lines sit, so what the form is keeping in view is on
     /// screen.
     scroll: u16,
+    /// What the hint says, which is not the same while a spawn is being made.
+    footer: &'static Footer,
     /// How many rows the hint takes, which is none on a region too short to
     /// spare them.
     hint: u16,
@@ -517,7 +798,7 @@ impl Widget for Form {
         Paragraph::new(self.lines)
             .scroll((self.scroll, 0))
             .render(body, buffer);
-        Paragraph::new(HINT.lines(usize::from(hint.width))).render(hint, buffer);
+        Paragraph::new(self.footer.lines(usize::from(hint.width))).render(hint, buffer);
     }
 }
 
@@ -771,7 +1052,7 @@ pub(crate) mod tests {
     /// room a blank one needs.
     const REGION: Size = Size {
         columns: 40,
-        rows: 18,
+        rows: 19,
     };
 
     /// The form as text, one string per row of the region.
@@ -818,6 +1099,7 @@ NEW SPAWN
     Large
 
 Tab moves between fields
+F5 starts it
 F6 / F7 leave it — nothing is lost"
         );
     }
@@ -1150,6 +1432,219 @@ F6 / F7 leave it — nothing is lost"
         assert_ne!(started[0], started[1]);
         assert_ne!(started[1], started[2]);
         assert_ne!(started[0], started[2]);
+    }
+
+    // Starting one: what a draft hands over, what it says while it happens, and
+    // what it is again if it does not.
+
+    /// A draft with a repository and some work in it, ready to be started.
+    fn filled_in() -> Drafts {
+        let mut drafts = Drafts::new(offered());
+        let id = drafts.start();
+        for character in "/code/project".chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+        drafts.edit(id, Edit::Next);
+        for character in "add retry logic".chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+
+        drafts
+    }
+
+    /// The one draft there is.
+    fn only(drafts: &Drafts) -> &Draft {
+        &drafts.all()[0]
+    }
+
+    /// The region a form carrying a creation's record needs, which is longer
+    /// than a blank one's by exactly that record.
+    const WITH_A_RECORD: Size = Size {
+        columns: 40,
+        rows: 24,
+    };
+
+    #[test]
+    fn starting_a_draft_hands_over_what_was_typed_and_what_was_picked() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        let wanted = drafts.submit(id).expect("a draft that says enough");
+
+        assert_eq!(wanted.repository, PathBuf::from("/code/project"));
+        assert_eq!(wanted.work, "add retry logic");
+        // The ids of what each list settled on, which is all the form ever knew
+        // about them.
+        assert_eq!(wanted.answers, ["blue", "small"]);
+    }
+
+    #[test]
+    fn a_choice_made_in_the_form_is_the_answer_that_is_handed_over() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.edit(id, Edit::Next);
+        drafts.edit(id, Edit::Up);
+
+        let wanted = drafts.submit(id).expect("a draft that says enough");
+
+        assert_eq!(wanted.answers, ["red", "small"]);
+    }
+
+    /// **Refuse rather than guess, and never at the cost of the typing.** The
+    /// app has no way to invent a repository, and a draft that stopped for that
+    /// reason is one keystroke from being right.
+    #[test]
+    fn a_draft_that_does_not_say_enough_refuses_in_place_and_keeps_every_character() {
+        let mut drafts = Drafts::new(offered());
+        let id = drafts.start();
+        drafts.edit(id, Edit::Next);
+        for character in "add retry logic".chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+
+        assert!(drafts.submit(id).is_none());
+
+        let screen = drawn(only(&drafts), WITH_A_RECORD);
+        assert!(screen.contains("NOT STARTED"), "{screen}");
+        assert!(screen.contains("which repository"), "{screen}");
+        assert!(screen.contains("add retry logic"), "{screen}");
+        assert!(only(&drafts).stopped());
+    }
+
+    #[test]
+    fn a_draft_with_nothing_said_about_the_work_is_not_started_either() {
+        let mut drafts = Drafts::new(offered());
+        let id = drafts.start();
+        for character in "/code/project".chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+
+        assert!(drafts.submit(id).is_none());
+        assert!(drafts.all()[0].stopped());
+    }
+
+    #[test]
+    fn what_it_is_doing_is_shown_in_the_form_as_it_does_it() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+
+        drafts.doing(id, "reading /code/project".to_string());
+        drafts.doing(
+            id,
+            "creating the worktree /w/a7f3 on spawn/a7f3".to_string(),
+        );
+
+        let screen = drawn(only(&drafts), WITH_A_RECORD);
+        assert!(screen.contains("STARTING"), "{screen}");
+        assert!(screen.contains("  reading /code/project"), "{screen}");
+        assert!(screen.contains("  creating the worktree"), "{screen}");
+    }
+
+    /// The whole reason a creation says what it is *about* to do: what it got as
+    /// far as survives it stopping, so a worktree left on disk is written down
+    /// rather than a mystery.
+    #[test]
+    fn a_creation_that_stopped_still_says_what_it_had_already_made() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+        drafts.doing(
+            id,
+            "creating the worktree /w/a7f3 on spawn/a7f3".to_string(),
+        );
+
+        drafts.failed(id, "the worktree root is full".to_string());
+
+        let screen = drawn(only(&drafts), WITH_A_RECORD);
+        assert!(screen.contains("NOT STARTED"), "{screen}");
+        assert!(screen.contains("  creating the worktree"), "{screen}");
+        assert!(screen.contains("the worktree root is full"), "{screen}");
+    }
+
+    #[test]
+    fn a_draft_being_made_into_a_spawn_takes_no_more_keystrokes() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+
+        drafts.edit(id, Edit::Typed('x'));
+        drafts.edit(id, Edit::Erased);
+        drafts.edit(id, Edit::Next);
+
+        assert_eq!(only(&drafts).work.text(), "add retry logic");
+        assert_eq!(
+            only(&drafts).on,
+            1,
+            "the keyboard was moved out of the field"
+        );
+        assert!(
+            only(&drafts).form(REGION).caret().is_none(),
+            "a caret said what you type would land somewhere it would not"
+        );
+    }
+
+    #[test]
+    fn a_draft_that_could_not_be_started_is_written_again_from_where_it_was() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+        drafts.failed(id, "there is no such repository".to_string());
+
+        drafts.edit(id, Edit::Typed('!'));
+
+        assert_eq!(only(&drafts).work.text(), "add retry logic!");
+        assert!(only(&drafts).form(REGION).caret().is_some());
+    }
+
+    #[test]
+    fn one_draft_is_started_once_however_often_it_is_asked_for() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        assert!(drafts.submit(id).is_some());
+        assert!(
+            drafts.submit(id).is_none(),
+            "a second worktree was asked for while the first was being made"
+        );
+    }
+
+    #[test]
+    fn a_draft_that_could_not_be_started_can_be_started_again() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+        drafts.failed(id, "there is no such repository".to_string());
+
+        assert!(drafts.submit(id).is_some());
+    }
+
+    #[test]
+    fn a_draft_that_became_a_spawn_is_no_longer_a_draft() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        drafts.finished(id);
+
+        assert!(drafts.all().is_empty());
+        assert!(drafts.of(id).is_none());
+    }
+
+    #[test]
+    fn a_form_says_what_starts_it_and_stops_saying_so_once_it_has() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        let writing = drawn(only(&drafts), REGION);
+        drafts.submit(id);
+        let starting = drawn(only(&drafts), REGION);
+
+        assert!(writing.contains("F5 starts it"), "{writing}");
+        assert!(
+            !starting.contains("F5 starts it"),
+            "the form still offers to start something it is already starting:\n{starting}"
+        );
+        assert!(starting.contains("F6 / F7"), "{starting}");
     }
 
     #[test]
