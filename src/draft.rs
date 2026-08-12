@@ -26,6 +26,17 @@
 //! untouched**, which is what makes *refuse rather than guess* affordable — a
 //! refusal never costs somebody the paragraph they just wrote. The making
 //! itself is [`crate::creation`]'s; what is here is the asking and the saying.
+//!
+//! **Throwing one away is the counterpart, and it is deliberately not
+//! retirement.** A draft has made nothing — no worktree, no branch, nothing on
+//! disk, no process doing work — so there is no order to take it down in, no
+//! cleanliness to check and nothing to refuse: it is a record leaving a list,
+//! and it costs nothing but the words. What it costs is the words, though, and
+//! they exist nowhere else — so **it is the one thing in the app that asks
+//! first**. The first press is the question and any other key answers it *no*.
+//! The single exception is a draft a spawn is already being made from, which is
+//! the one moment a draft owns something: it refuses until the creation stops,
+//! because its record is the only thing saying what that creation has made.
 
 use std::path::PathBuf;
 
@@ -37,7 +48,7 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::creation::Wanted;
 use crate::harness::{Choice, Choices};
-use crate::scaffolding::{self, AMBER, DIM, Footer, broken, scroll_offset};
+use crate::scaffolding::{self, AMBER, DIM, Footer, broken, scroll_offset, wrapped};
 use crate::screen::Size;
 
 /// What the form calls itself, above everything it asks.
@@ -59,6 +70,34 @@ const STARTING: &str = "STARTING";
 /// anything. A heading rather than only a colour: the difference between *this
 /// is happening* and *this did not happen* is the whole of what the block says.
 const NOT_STARTED: &str = "NOT STARTED";
+
+/// What the form calls the block that asks whether to throw the draft away.
+const DISCARD: &str = "DISCARD THIS DRAFT?";
+
+/// What the question says under that heading, which is nearly always.
+const NOWHERE_ELSE: &str = "what is typed here exists nowhere else, and there is no worktree, \
+                            no branch and no session to lose with it — only the words";
+
+/// What it says instead when a creation stopped after it had already made
+/// something.
+///
+/// **The one thing throwing a draft away can leave behind**, and the question is
+/// where it is said: the record above names the worktree, and this run is the
+/// last thing that will mention it — until the app is started again and reports
+/// what it found under the worktree root. Litter is accepted; *invisible* litter
+/// is not, and a question claiming there was nothing to lose is exactly how this
+/// would have become invisible.
+const AND_WHAT_WAS_MADE: &str = "the words go. What the record above says was already made does \
+                                 not — it stays where the record says it is, and nothing in this \
+                                 run will mention it again";
+
+/// What the form calls that block when the draft will not be thrown away.
+const NOT_DISCARDED: &str = "NOT DISCARDED";
+
+/// Why a draft being made into a spawn is not thrown away.
+const WHILE_IT_IS_BEING_MADE: &str = "a spawn is being made from it, and this record is the only \
+                                      thing saying what that has already made. It can be discarded \
+                                      once the creation has stopped";
 
 /// Why a draft with nothing in the repository field cannot be started.
 const MISSING_REPOSITORY: &str =
@@ -87,16 +126,45 @@ const PICKED: &str = "› ";
 /// where a full-height form is exactly the place somebody would assume they had
 /// been taken somewhere modal.
 ///
-/// The shortest form that can still spare it three rows is nine: below that
+/// **The key that throws it away is learnt here**, because here is where a
+/// draft is: the list's footer is about spawns, and a draft's own keys belong
+/// under its own form. It says that it asks first, because that is what makes it
+/// safe to press and the reason it can sit beside the key that starts one.
+///
+/// The shortest form that can still spare it four rows is ten: below that
 /// there is not room for a heading, a field and a list of choices, which is the
 /// least of the form worth showing.
 const HINT: Footer = Footer::new(
     &[
         "Tab moves between fields",
         "F5 starts it",
+        "F3 discards it — it asks first",
         "F6 / F7 leave it — nothing is lost",
     ],
-    9,
+    10,
+);
+
+/// What it says while it is waiting to be told whether to throw the draft away.
+///
+/// Nothing else, because nothing else is what the keyboard is doing: every key
+/// on it that does anything at all is now one of two answers. It says which key
+/// is *yes* and leaves the rest of the keyboard as *no*, rather than naming a
+/// second key — a question with two keys to learn is one somebody answers by
+/// pressing whichever they half-remember.
+///
+/// **It promises what the app honours, and no more.** "Anything else keeps it"
+/// would be false on screen: a key the app has no meaning for — `Esc`, `F1`,
+/// `F4` — leaves the question standing rather than answering it, so a footer
+/// saying otherwise teaches somebody to press `Esc` and walk away from a
+/// question that is still up. Typing and moving away are the two that really do
+/// take it back, and they are the two anybody reaches for.
+///
+/// Its column has to be eight rows for the same reason [`HINT`]'s has to be ten:
+/// six rows are the least of the form worth showing, and the footer's own lines
+/// come on top of them.
+const WHILE_ASKING: Footer = Footer::new(
+    &["F3 again discards it", "Typing or moving away keeps it"],
+    8,
 );
 
 /// What it says instead while the spawn is being made.
@@ -105,6 +173,9 @@ const HINT: Footer = Footer::new(
 /// anywhere: the text is being used. What is still true is the thing worth
 /// saying — walking away does not stop it, which is the same promise the list
 /// makes about quitting.
+///
+/// Seven rows for its one line, by the same arithmetic: six of content, one of
+/// footer.
 const WHILE_STARTING: Footer = Footer::new(&["F6 / F7 leave it — it carries on"], 7);
 
 /// Which draft.
@@ -223,6 +294,41 @@ impl Drafts {
         self.doing_to(id, |draft| draft.failed(why));
     }
 
+    /// Ask for a draft to be thrown away, and say whether it went.
+    ///
+    /// **It asks first, and the asking is the first press of the key.** Nothing
+    /// else in the app destroys something that exists nowhere else: a spawn's
+    /// work is on a branch and a refusal is what protects it, where a draft is a
+    /// paragraph somebody typed and there is nothing to refuse. So the answer to
+    /// the first press is the question, and the second press is the answer.
+    pub fn discarded(&mut self, id: Id) -> bool {
+        if !self
+            .all
+            .iter_mut()
+            .find(|draft| draft.id == id)
+            .is_some_and(Draft::discarded)
+        {
+            return false;
+        }
+        self.all.retain(|draft| draft.id != id);
+
+        true
+    }
+
+    /// Take back every question that has been asked about throwing a draft
+    /// away.
+    ///
+    /// Every one rather than a named one, because a question is not a thing to
+    /// keep track of: it is answered *no* by anything at all that is not the
+    /// answer, so the app takes them all back rather than working out which one
+    /// the keystroke was near. A draft with no question standing is untouched by
+    /// this.
+    pub fn take_back_every_question(&mut self) {
+        for draft in &mut self.all {
+            draft.discarding = None;
+        }
+    }
+
     /// Let go of a draft that has become a spawn.
     ///
     /// The row does not become the spawn's row so much as make way for it: the
@@ -260,6 +366,22 @@ pub struct Draft {
     on: usize,
     /// What has happened since it was submitted, if it has been.
     progress: Option<Progress>,
+    /// Where throwing it away has got to, if anybody has asked to.
+    discarding: Option<Discarding>,
+}
+
+/// How far the app has got with a request to throw a draft away.
+///
+/// **A question rather than an act**, which is what makes it a state at all:
+/// everywhere else in the app a key does what it says, and here the first press
+/// only asks. The second shape is the one case where the answer cannot be *yes*
+/// yet, and it is a state for the same reason — the draft has to be able to say
+/// so on screen rather than the key appearing to do nothing.
+enum Discarding {
+    /// Asked, and waiting for the answer.
+    Asked,
+    /// Refused, because a spawn is being made from it.
+    Refused,
 }
 
 /// What a creation has said about a draft it was asked to make.
@@ -314,6 +436,7 @@ impl Draft {
             choices: choices.iter().filter_map(Picked::of).collect(),
             on: 0,
             progress: None,
+            discarding: None,
         }
     }
 
@@ -388,11 +511,55 @@ impl Draft {
     }
 
     /// Say the creation stopped, and give the draft back to the keyboard.
+    ///
+    /// **Including any refusal it was carrying.** A draft refuses to be thrown
+    /// away only for as long as a spawn is being made from it; once that stops,
+    /// the sentence saying so is about nothing that is happening. Left standing
+    /// it would tell the reader a creation is running, keep the caret away from
+    /// a form that is taking keys again, and spend the next character typed on a
+    /// question nobody is being asked.
     fn failed(&mut self, why: String) {
+        self.discarding = None;
         match &mut self.progress {
             Some(progress) => progress.trouble = Some(why),
             None => self.progress = Some(Progress::refused(&why)),
         }
+    }
+
+    /// Ask for it to be thrown away, and say whether it goes.
+    ///
+    /// The first ask is the question; the second is the answer to it.
+    fn discarded(&mut self) -> bool {
+        // **The one draft that owns something.** A creation is on a thread of
+        // its own, it cannot be called back, and the draft's record is the only
+        // thing on screen naming the worktree it is making — so throwing it away
+        // would orphan the worktree and the sentence about it at once. Refusing
+        // rather than waiting: waiting would mean a keystroke whose effect
+        // arrives seconds later, on a row somebody has walked away from.
+        if self.starting() {
+            self.discarding = Some(Discarding::Refused);
+
+            return false;
+        }
+        if matches!(self.discarding, Some(Discarding::Asked)) {
+            return true;
+        }
+        self.discarding = Some(Discarding::Asked);
+
+        false
+    }
+
+    /// Whether a creation got far enough to have made something that is still
+    /// there.
+    ///
+    /// **Any step at all counts.** Each line was written before the thing it
+    /// describes was attempted, so a creation that said one thing may have done
+    /// it — and the question this answers is *is there anything to be left
+    /// behind*, where a maybe has to read as a yes.
+    fn made_something(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(|progress| !progress.steps.is_empty())
     }
 
     /// What the list calls it: the first thing said about the work, or a
@@ -418,6 +585,17 @@ impl Draft {
     /// typed into the form now would change what is on screen and nothing else,
     /// which is the one thing a form must never do.
     fn edited(&mut self, edit: Edit) {
+        // A question about throwing it away stands until it is answered, and
+        // anything but the answer is an answer of *no* — including a key aimed
+        // at the form. The keystroke is spent saying so rather than also landing
+        // in the text, so *don't* never leaves a character behind.
+        //
+        // **Only the question is worth a keystroke.** A refusal is a notice
+        // rather than something waiting on an answer, so a key clears it and
+        // goes on to do what it says: there is nothing there to answer *no* to.
+        if matches!(self.discarding.take(), Some(Discarding::Asked)) {
+            return;
+        }
         if self.starting() {
             return;
         }
@@ -460,7 +638,10 @@ impl Draft {
     /// the form is going to change and that is the only thing worth a short
     /// slot's rows. Once it is being written again — including after a creation
     /// stopped — it is the control the keyboard is in, because a caret you
-    /// cannot see is worse than a reason you have to scroll to.
+    /// cannot see is worse than a reason you have to scroll to. And while a
+    /// question about throwing it away is standing, it is the question, which
+    /// outranks both: it is the only thing on the form waiting on an answer, and
+    /// the next key is that answer wherever the form happens to be scrolled to.
     pub fn form(&self, region: Size) -> Form {
         let footer = self.footer();
         let hint = footer.rows(region.rows);
@@ -501,10 +682,12 @@ impl Draft {
             lines.push(Line::raw(""));
         }
 
+        let mut record = None;
         if let Some(progress) = &self.progress {
             let from = lines.len();
             lines.extend(said(progress, width));
             let last = lines.len() - 1;
+            record = Some(from);
 
             showing = Some(match showing {
                 // Being written again, so the control the keyboard is in is what
@@ -516,6 +699,23 @@ impl Draft {
             });
         }
 
+        if let Some(discarding) = &self.discarding {
+            if record.is_some() {
+                lines.push(Line::raw(""));
+            }
+            let from = lines.len();
+            lines.extend(asked(discarding, self.made_something(), width));
+            // The newest thing on the form and the only one waiting on a person,
+            // so it wins the rows outright — including from the control the
+            // keyboard is in, which is not being typed into while a question is
+            // up. **The record comes with it** where there is one: both the
+            // question and the refusal are about what a creation already made,
+            // and pointing at a record that has scrolled off says nothing. A
+            // form too short for both keeps the end of the span, which is the
+            // question itself.
+            showing = Some((record.unwrap_or(from), lines.len() - 1));
+        }
+
         let scroll = scroll_offset(showing, height);
 
         Form {
@@ -523,10 +723,11 @@ impl Draft {
             scroll,
             footer,
             hint,
-            // Nothing to type into while the spawn is being made, so nothing
+            // Nothing to type into while the spawn is being made — or while a
+            // question is standing, where the next key is an answer — so nothing
             // saying you can: a caret parked in a field the keyboard cannot
             // reach is the form telling a lie about itself.
-            caret: (!self.starting())
+            caret: (!self.starting() && self.discarding.is_none())
                 .then(|| {
                     caret.and_then(|(column, row)| on_region(column, row, scroll, region, height))
                 })
@@ -535,11 +736,15 @@ impl Draft {
     }
 
     /// What the foot of the form says, which depends on what it is doing.
+    ///
+    /// A question outranks the rest: while one is standing every key on the
+    /// keyboard is one of two answers, so a footer still listing what the form
+    /// does would be listing things no key will do next.
     fn footer(&self) -> &'static Footer {
-        if self.starting() {
-            &WHILE_STARTING
-        } else {
-            &HINT
+        match &self.discarding {
+            Some(Discarding::Asked) => &WHILE_ASKING,
+            _ if self.starting() => &WHILE_STARTING,
+            _ => &HINT,
         }
     }
 }
@@ -575,6 +780,30 @@ fn said(progress: &Progress, width: usize) -> Vec<Line<'static>> {
                 .map(|line| indented(line, DIM.fg(AMBER))),
         );
     }
+
+    lines
+}
+
+/// What the form says about throwing the draft away: the question, or why it
+/// will not be thrown away yet.
+///
+/// **In amber, which is the colour the app admits things in.** A question is not
+/// an admission, but it is the same thing from where the user sits — the app
+/// saying *this one is on you* — and it is the only thing on the form that is
+/// waiting for an answer rather than describing something.
+fn asked(discarding: &Discarding, made_something: bool, width: usize) -> Vec<Line<'static>> {
+    let (heading, why) = match discarding {
+        Discarding::Asked if made_something => (DISCARD, AND_WHAT_WAS_MADE),
+        Discarding::Asked => (DISCARD, NOWHERE_ELSE),
+        Discarding::Refused => (NOT_DISCARDED, WHILE_IT_IS_BEING_MADE),
+    };
+
+    let mut lines = vec![Line::styled(heading, scaffolding::HEADING.fg(AMBER))];
+    lines.extend(
+        wrapped(why, width)
+            .iter()
+            .map(|line| indented(line, DIM.fg(AMBER))),
+    );
 
     lines
 }
@@ -1052,7 +1281,7 @@ pub(crate) mod tests {
     /// room a blank one needs.
     const REGION: Size = Size {
         columns: 40,
-        rows: 19,
+        rows: 20,
     };
 
     /// The form as text, one string per row of the region.
@@ -1100,6 +1329,7 @@ NEW SPAWN
 
 Tab moves between fields
 F5 starts it
+F3 discards it — it asks first
 F6 / F7 leave it — nothing is lost"
         );
     }
@@ -1641,6 +1871,267 @@ F6 / F7 leave it — nothing is lost"
         drafts.failed(id, "there is no such repository".to_string());
 
         assert!(drafts.submit(id).is_some());
+    }
+
+    // Throwing one away, which is the one thing in the app that destroys
+    // something existing nowhere else — and therefore the one thing that asks.
+
+    /// **A keystroke does not throw away a paragraph.** Everywhere else a
+    /// refusal is what protects the typing; here there is nothing to refuse, so
+    /// the question is what protects it.
+    #[test]
+    fn a_draft_asks_before_it_is_thrown_away() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        assert!(!drafts.discarded(id), "the draft went without being asked");
+
+        assert_eq!(drafts.all().len(), 1);
+        let screen = drawn(only(&drafts), WITH_A_RECORD);
+        assert!(screen.contains("DISCARD"), "{screen}");
+        assert!(
+            screen.contains("add retry logic"),
+            "the question cost the paragraph it was asked about:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_draft_asked_about_twice_goes() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        drafts.discarded(id);
+
+        assert!(drafts.discarded(id), "the answer did not throw it away");
+        assert!(drafts.all().is_empty());
+        assert!(drafts.of(id).is_none());
+    }
+
+    /// **Other drafts are unaffected**, which is the whole of what a draft owns:
+    /// a record in a list, and throwing one away is one record leaving it.
+    #[test]
+    fn throwing_one_draft_away_leaves_every_other_exactly_as_it_was() {
+        let mut drafts = drafting(&["the first", "the second", "the third"]);
+        let second = drafts.all()[1].id();
+
+        drafts.discarded(second);
+        assert!(drafts.discarded(second));
+
+        let left: Vec<String> = drafts.all().iter().map(Draft::title).collect();
+        assert_eq!(left, ["the first", "the third"]);
+    }
+
+    /// A keystroke that is not the answer answers *no* — and is spent saying
+    /// so. It has to be spent: a key that both took the question back and typed
+    /// itself into the field would leave a character behind from a keystroke
+    /// somebody meant as *don't*.
+    #[test]
+    fn anything_typed_at_the_question_keeps_the_draft_and_is_not_typed_into_it() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.discarded(id);
+
+        drafts.edit(id, Edit::Typed('x'));
+
+        assert_eq!(drafts.all().len(), 1);
+        let screen = drawn(only(&drafts), WITH_A_RECORD);
+        assert!(
+            !screen.contains("DISCARD"),
+            "the question is still standing:\n{screen}"
+        );
+        assert_eq!(only(&drafts).work.text(), "add retry logic");
+    }
+
+    /// And a question is never left standing behind you: walking off the row
+    /// takes it back, so coming back to a draft never lands on an armed
+    /// keystroke.
+    #[test]
+    fn moving_away_from_a_draft_takes_the_question_back() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.discarded(id);
+
+        drafts.take_back_every_question();
+
+        let screen = drawn(only(&drafts), WITH_A_RECORD);
+        assert!(!screen.contains("DISCARD"), "{screen}");
+        assert!(
+            !drafts.discarded(id),
+            "the next press answered a question that had been taken back"
+        );
+    }
+
+    /// The region a form needs for a creation's record **and** a question about
+    /// throwing the draft away, which is the longest a form ever gets.
+    const WITH_A_QUESTION: Size = Size {
+        columns: 40,
+        rows: 32,
+    };
+
+    /// **A draft mid-creation is the one draft that owns something.** It has
+    /// made, or is about to make, a worktree — and its record is the only thing
+    /// on screen saying so, so throwing it away would orphan the worktree and
+    /// the sentence naming it in the same keystroke. It refuses, and says why.
+    #[test]
+    fn a_draft_a_spawn_is_being_made_from_is_not_thrown_away() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+        drafts.doing(
+            id,
+            "creating the worktree /w/a7f3 on spawn/a7f3".to_string(),
+        );
+
+        assert!(!drafts.discarded(id));
+        assert!(
+            !drafts.discarded(id),
+            "asking twice threw away a draft that is making a worktree"
+        );
+
+        assert_eq!(drafts.all().len(), 1);
+        let screen = drawn(only(&drafts), WITH_A_QUESTION);
+        assert!(screen.contains("NOT DISCARDED"), "{screen}");
+        assert!(
+            screen.contains("creating the worktree"),
+            "the record of what it has already made is not beside the refusal:\n{screen}"
+        );
+        assert!(
+            only(&drafts).starting(),
+            "refusing to throw it away stopped the creation being one"
+        );
+    }
+
+    /// **The one thing throwing a draft away can leave behind.** A creation that
+    /// stopped after it had already made a worktree leaves it on disk, and this
+    /// record is the only thing on screen naming it — so the question says that
+    /// rather than claiming there is nothing to lose but the words. What it
+    /// does not do is refuse: the record above the question is what somebody is
+    /// answering it with, and the app names what it finds under the worktree
+    /// root the next time it starts.
+    #[test]
+    fn a_draft_whose_creation_already_made_something_says_so_when_it_asks() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+        drafts.doing(
+            id,
+            "creating the worktree /w/a7f3 on spawn/a7f3".to_string(),
+        );
+        drafts.failed(id, "the harness would not start".to_string());
+
+        drafts.discarded(id);
+
+        let screen = drawn(only(&drafts), WITH_A_QUESTION);
+        assert!(screen.contains("DISCARD"), "{screen}");
+        assert!(
+            !screen.contains("no worktree"),
+            "the question claimed there was nothing to lose, beside a record of a worktree:\n\
+             {screen}"
+        );
+        assert!(
+            screen.contains("/w/a7f3"),
+            "the record naming what is being left behind is not beside the question:\n{screen}"
+        );
+    }
+
+    /// **The footer promises only what the app honours.** A key it has no
+    /// meaning for — `Esc`, `F1`, `F4` — leaves the question standing rather
+    /// than answering it, so a footer saying that anything else keeps the draft
+    /// teaches somebody to press `Esc` and walk away from a question still up.
+    #[test]
+    fn the_question_names_only_the_answers_the_app_really_takes() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        drafts.discarded(id);
+
+        let screen = drawn(only(&drafts), WITH_A_QUESTION);
+        assert!(screen.contains("F3 again discards it"), "{screen}");
+        assert!(
+            !screen.contains("Anything else"),
+            "the footer promises of every other key something the app does not do:\n{screen}"
+        );
+    }
+
+    /// **A refusal is a notice, and it does not outlive what it was about.**
+    /// Press the key mid-creation and the draft says no; when that creation then
+    /// stops, the draft is only text again and the refusal is a sentence about a
+    /// spawn nobody is making. Left standing it costs three things at once: the
+    /// form says a spawn is being made from it, the caret stays away from a form
+    /// that is taking keys again, and the next character typed is swallowed by a
+    /// question that is not being asked.
+    #[test]
+    fn a_refusal_does_not_outlive_the_creation_it_was_about() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+        drafts.discarded(id);
+        drafts.failed(id, "the harness would not start".to_string());
+
+        let screen = drawn(only(&drafts), WITH_A_QUESTION);
+        assert!(
+            !screen.contains(NOT_DISCARDED),
+            "a draft nothing is being made from still refuses to be thrown away:\n{screen}"
+        );
+        assert!(
+            only(&drafts).form(WITH_A_QUESTION).caret().is_some(),
+            "the form is taking keys again with nowhere to show them going"
+        );
+
+        drafts.edit(id, Edit::Typed('!'));
+
+        let typed = drawn(only(&drafts), WITH_A_QUESTION);
+        assert!(
+            typed.contains("add retry logic!"),
+            "the first character typed after the creation stopped was swallowed:\n{typed}"
+        );
+    }
+
+    /// And the moment the creation stops, the draft is only text again — so it
+    /// can be thrown away like any other, record and all.
+    #[test]
+    fn a_draft_whose_creation_stopped_can_be_thrown_away() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.submit(id);
+        drafts.failed(id, "the worktree root is full".to_string());
+
+        assert!(!drafts.discarded(id), "it went without being asked");
+        assert!(drafts.discarded(id));
+        assert!(drafts.all().is_empty());
+    }
+
+    /// Nothing to type into while a question is up: the next key is an answer,
+    /// and a caret would say it was going into the field it is sitting in.
+    #[test]
+    fn a_question_takes_the_caret_away_because_the_next_key_is_an_answer() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        drafts.discarded(id);
+
+        assert!(only(&drafts).form(WITH_A_QUESTION).caret().is_none());
+    }
+
+    /// The key that throws a draft away is learnt where the draft is, because
+    /// the list's own footer is about spawns — and while the question is
+    /// standing the foot of the form says what answers it, since that is the
+    /// only thing the keyboard is doing.
+    #[test]
+    fn a_form_says_what_throws_it_away_and_then_what_answers_the_question() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+
+        let writing = drawn(only(&drafts), WITH_A_QUESTION);
+        drafts.discarded(id);
+        let asking = drawn(only(&drafts), WITH_A_QUESTION);
+
+        assert!(writing.contains("F3 discards it"), "{writing}");
+        assert!(asking.contains("F3 again"), "{asking}");
+        assert!(
+            !asking.contains("F5 starts it"),
+            "the form offers to start a draft it is asking about throwing away:\n{asking}"
+        );
     }
 
     #[test]

@@ -156,8 +156,9 @@ pub fn usage() -> String {
          \n\
          everything you type goes to whatever is in the slot; F6 and F7 move\n\
          between them, F2 starts a draft of another session, F5 starts what a\n\
-         draft describes, F9 retires the session you are on, and F10 quits and\n\
-         leaves every one of them running.\n",
+         draft describes, F3 throws a draft away — it asks first — F9 retires\n\
+         the session you are on, and F10 quits and leaves every one of them\n\
+         running.\n",
         offer(&harness::models(), harness::default_model()),
         offer(&harness::effort_levels(), harness::default_effort_level()),
     )

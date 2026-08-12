@@ -8,8 +8,9 @@
 //! What is in the slot is a spawn's own screen: a grid the control-mode client
 //! keeps current whether or not it is the one being shown, copied here cell by
 //! cell. Keystrokes go the other way. **The app types into a spawn only what the
-//! user typed** — it has no keyboard of its own beyond the six keys that leave,
-//! move the selection, start a draft, make one into a spawn, and retire one.
+//! user typed** — it has no keyboard of its own beyond the seven keys that
+//! leave, move the selection, start a draft, throw one away, make one into a
+//! spawn, and retire one.
 //!
 //! **Or the slot holds a draft**, which is a form the app draws and types into
 //! itself. That is the one place an ordinary key means something to the app
@@ -87,6 +88,22 @@ const QUIT: event::KeyCode = event::KeyCode::F(10);
 const UP: event::KeyCode = event::KeyCode::F(6);
 /// Take it one row down.
 const DOWN: event::KeyCode = event::KeyCode::F(7);
+/// Throw the draft the list is on away.
+///
+/// **Beside the key that starts one, because it is the other end of the same
+/// thing**: `F2` makes a draft and `F3` gets rid of one, and a hand reaching for
+/// either is coming from the same place. That would be reckless anywhere else in
+/// this block — it is one row of a mistyped `F2` from a paragraph that exists
+/// nowhere else — and it is safe here for exactly one reason: **it asks first**.
+/// The first press is a question, and any other key answers it *no*.
+///
+/// It is the only key in the app that asks, and the only one that needs to. A
+/// retirement can refuse, because there is a worktree to look at and a branch
+/// that outlives it; a draft is text in a slot and there is nothing to look at
+/// afterwards, so the question is the only thing standing between a keystroke
+/// and somebody's paragraph.
+const DISCARD: event::KeyCode = event::KeyCode::F(3);
+
 /// Start a draft, and put the selection on it.
 ///
 /// A fourth function key, and it has to be one: composing is reached from a
@@ -394,18 +411,24 @@ pub fn run(held: &mut Held, world: &World) -> Result<()> {
                 shape = wanted;
             }
 
-            match asked_for(typing)? {
+            let asked = asked_for(typing)?;
+            // Before the keystroke is acted on, because it is the same
+            // keystroke: a question standing on a draft is answered *no* by
+            // anything that is not the answer, wherever the key was aimed.
+            if takes_the_question_back(&asked) {
+                held.drafts.take_back_every_question();
+            }
+
+            match asked {
                 Asked::Nothing => {}
                 Asked::Quit => return Ok(()),
-                Asked::Moved(step) => {
-                    let order = list::order(held.drafts.all(), &held.entries, &latest);
-                    held.cursor.moved(&order, step);
-                }
+                Asked::Moved(step) => held.moved(step, &latest),
                 Asked::Composed => held.cursor = Cursor::on_draft(held.drafts.start()),
                 Asked::Started => {
                     held.start(world.worktrees.clone(), env::var_os("PATH"), &reporting);
                 }
                 Asked::Retired => held.retire(world.server, retiring.clone()),
+                Asked::Discarded => held.discard(&latest),
                 Asked::Edited(edit) => {
                     if let Some(draft) = held.cursor.draft() {
                         held.drafts.edit(draft, edit);
@@ -589,6 +612,47 @@ impl Held {
         }
     }
 
+    /// Throw the draft the list is on away, once it has said yes to being asked.
+    ///
+    /// **The whole of what it takes is the app's own state.** No server, no
+    /// client, no channel and no thread: a draft owns no worktree, no branch and
+    /// no process, so there is nothing outside the app to tell and nothing to
+    /// take down in order. That is the difference from retiring, stated as a
+    /// signature rather than as a comment.
+    ///
+    /// **Only a draft, and only the one the selection is on.** Which is also why
+    /// there is no second way in from the list: the row the list is on and the
+    /// thing in the slot are the same draft, so throwing it away from its own
+    /// form and throwing it away from the list are one act.
+    ///
+    /// **The selection only moves if the draft it was on is the one that went**,
+    /// and it moves the way it does after a retirement — onto the first row of
+    /// what is left, which is where the drafts and the attention-first order
+    /// have already put whatever most wants somebody.
+    fn discard(&mut self, latest: &Snapshot) {
+        let Some(draft) = self.cursor.draft() else {
+            return;
+        };
+        if !self.drafts.discarded(draft) {
+            return;
+        }
+
+        self.moved(Step::Down, latest);
+    }
+
+    /// Move the selection a step through the list as it stands.
+    ///
+    /// **The order is worked out here rather than handed in**, because the only
+    /// order a step may be taken through is the one the list would draw *now*.
+    /// Every caller is a moment when the rows have just moved under the
+    /// selection — a draft thrown away, a spawn let go of, the keyboard asking
+    /// for the next row — and a step through an order taken before that lands on
+    /// a row nobody pointed at.
+    fn moved(&mut self, step: Step, latest: &Snapshot) {
+        let order = list::order(self.drafts.all(), &self.entries, latest);
+        self.cursor.moved(&order, step);
+    }
+
     /// Let go of a spawn that has been retired, and say which pane it was in.
     ///
     /// Everything the app was holding of it goes at once — the row, and the
@@ -620,8 +684,7 @@ impl Held {
         let _ = leaving.send(name.to_string());
 
         if self.cursor.spawn() == Some(name) {
-            let order = list::order(self.drafts.all(), &self.entries, latest);
-            self.cursor.moved(&order, Step::Down);
+            self.moved(Step::Down, latest);
         }
 
         Some(retired.pane)
@@ -726,6 +789,8 @@ enum Asked {
     Started,
     /// To retire the spawn the list is on.
     Retired,
+    /// To throw the draft the list is on away.
+    Discarded,
     /// Something for the draft in the slot.
     Edited(Edit),
     /// Something for the spawn, already in the bytes a terminal would send.
@@ -748,12 +813,12 @@ fn asked_for(typing: Typing) -> io::Result<Asked> {
 /// What one keystroke means.
 ///
 /// The whole of the split between the app's keyboard and whatever is in the
-/// slot, in one place and with nothing else in it: the five keys named here are
-/// the app's wherever the selection is, and everything else belongs to what the
-/// slot is holding — bytes for a session, an edit for a draft.
+/// slot, in one place and with nothing else in it: the seven keys named here
+/// are the app's wherever the selection is, and everything else belongs to what
+/// the slot is holding — bytes for a session, an edit for a draft.
 ///
-/// **The app's keys are the app's whatever is in the slot**, including the one
-/// that only ever does anything to a draft. A key that meant one thing over a
+/// **The app's keys are the app's whatever is in the slot**, including the two
+/// that only ever do anything to a draft. A key that meant one thing over a
 /// form and went to the session otherwise would be a key nobody could learn: it
 /// would reach a spawn as a keystroke the moment the selection moved.
 fn what_it_means(key: KeyEvent, typing: Typing) -> Asked {
@@ -768,6 +833,7 @@ fn what_it_means(key: KeyEvent, typing: Typing) -> Asked {
         COMPOSE => Asked::Composed,
         START => Asked::Started,
         RETIRE => Asked::Retired,
+        DISCARD => Asked::Discarded,
         UP => Asked::Moved(Step::Up),
         DOWN => Asked::Moved(Step::Down),
         _ => match typing {
@@ -776,6 +842,24 @@ fn what_it_means(key: KeyEvent, typing: Typing) -> Asked {
             Typing::Nowhere => Asked::Nothing,
         },
     }
+}
+
+/// Whether a keystroke is an answer of *no* to a question a draft is standing
+/// on.
+///
+/// **Everything is, except two things.** The answer of *yes* is one key, and a
+/// frame in which nothing was pressed is not an answer at all; everything else
+/// the user could do — moving, starting, retiring, typing at a session — says
+/// they were not asking for this. Naming a second key for *no* would be a second
+/// thing to learn about the one question in the app, and somebody half-
+/// remembering which key it was would press the other one.
+///
+/// An edit is left out because the draft itself takes the question back, and
+/// swallows the keystroke while it does: a key that both said *don't* and typed
+/// itself into the field would leave a character behind from a keystroke that
+/// meant the opposite.
+fn takes_the_question_back(asked: &Asked) -> bool {
+    !matches!(asked, Asked::Discarded | Asked::Nothing | Asked::Edited(_))
 }
 
 /// What one keystroke means to a form.
@@ -1410,11 +1494,12 @@ mod tests {
     }
 
     #[test]
-    fn the_app_keeps_six_keys_and_the_spawn_gets_every_other() {
+    fn the_app_keeps_seven_keys_and_the_spawn_gets_every_other() {
         assert!(matches!(pressed(QUIT), Asked::Quit));
         assert!(matches!(pressed(COMPOSE), Asked::Composed));
         assert!(matches!(pressed(START), Asked::Started));
         assert!(matches!(pressed(RETIRE), Asked::Retired));
+        assert!(matches!(pressed(DISCARD), Asked::Discarded));
         assert!(matches!(pressed(UP), Asked::Moved(Step::Up)));
         assert!(matches!(pressed(DOWN), Asked::Moved(Step::Down)));
         assert!(matches!(pressed(KeyCode::Char('2')), Asked::Typed(bytes) if bytes == b"2"));
@@ -1443,6 +1528,7 @@ mod tests {
         ));
         assert!(matches!(typed_at_a_draft(START), Asked::Started));
         assert!(matches!(typed_at_a_draft(RETIRE), Asked::Retired));
+        assert!(matches!(typed_at_a_draft(DISCARD), Asked::Discarded));
     }
 
     #[test]
@@ -2231,6 +2317,134 @@ mod tests {
             screen.contains("▍- add-retry-logic-a7f3"),
             "the row does not say it is being retired:\n{screen}"
         );
+    }
+
+    // Throwing a draft away, which is the third thing that changes what the app
+    // is holding while it runs — and the only one that takes something away
+    // without touching anything outside the app.
+
+    /// **It asks first, and the question is on the screen somebody is looking
+    /// at.** Then the row goes, the form goes with it, and nothing else on the
+    /// screen moved: the other draft still holds its own text and every spawn is
+    /// still listed under its own repository.
+    #[test]
+    fn discarding_the_draft_the_list_is_on_asks_first_and_then_takes_only_that_row() {
+        let mut held = Held::new(
+            several(),
+            drafting(&["the first draft", "the second draft"]),
+        );
+        held.cursor = Cursor::on_draft(held.drafts.all()[1].id());
+
+        held.discard(&Snapshot::default());
+        let asking = on_screen(&held);
+        held.discard(&Snapshot::default());
+
+        assert!(
+            asking.contains("DISCARD"),
+            "the draft went without the app asking:\n{asking}"
+        );
+        assert!(
+            asking.contains("the second draft"),
+            "the question cost the typing it was asked about:\n{asking}"
+        );
+        let screen = on_screen(&held);
+        assert!(
+            !screen.contains("the second draft"),
+            "the draft that was discarded still has a row:\n{screen}"
+        );
+        assert!(
+            screen.contains("the first draft"),
+            "discarding one draft took another with it:\n{screen}"
+        );
+        for still_there in [
+            "add-retry-logic-a7f3",
+            "fix-the-flake-b2c9",
+            "drop-the-cache-d4e1",
+        ] {
+            assert!(
+                screen.contains(still_there),
+                "discarding a draft cost a spawn:\n{screen}"
+            );
+        }
+    }
+
+    /// The selection lands on the first row of what is left — and the slot
+    /// follows it, which is what *the pane closes* means for a thing that never
+    /// had one.
+    #[test]
+    fn the_selection_leaves_the_row_a_discarded_draft_was_on() {
+        let mut held = Held::new(
+            several(),
+            drafting(&["the first draft", "the second draft"]),
+        );
+        held.cursor = Cursor::on_draft(held.drafts.all()[1].id());
+
+        held.discard(&Snapshot::default());
+        held.discard(&Snapshot::default());
+
+        assert_eq!(held.cursor.draft(), Some(held.drafts.all()[0].id()));
+        let screen = on_screen(&held);
+        assert!(
+            screen.contains("  the first draft"),
+            "the slot is not showing the draft the selection landed on:\n{screen}"
+        );
+    }
+
+    /// The last draft there was, on an app that has spawns: the slot goes back
+    /// to a session, and the list is still the list.
+    #[test]
+    fn discarding_the_only_draft_leaves_the_slot_on_a_spawn() {
+        let mut held = Held::new(several(), drafting(&["the only draft"]));
+        held.cursor = Cursor::on_draft(held.drafts.all()[0].id());
+
+        held.discard(&Snapshot::default());
+        held.discard(&Snapshot::default());
+
+        assert!(held.drafts.all().is_empty());
+        let screen = on_screen(&held);
+        assert!(
+            !screen.contains("NEW SPAWN"),
+            "the form is still in the slot:\n{screen}"
+        );
+        assert!(screen.contains("the first spawn is talking"), "{screen}");
+        assert!(screen.contains("SPAWNS"), "the list has gone:\n{screen}");
+    }
+
+    /// **The key does nothing at all to a spawn.** A spawn has a session, a
+    /// worktree and a branch, and getting rid of one is retiring — an ordered
+    /// teardown that can refuse. Nothing here is allowed to be a second way into
+    /// that.
+    #[test]
+    fn discarding_does_nothing_when_the_list_is_on_a_spawn() {
+        let mut held = Held::new(several(), drafting(&["a draft as well"]));
+        held.cursor = Cursor::on_spawn("fix-the-flake-b2c9");
+
+        held.discard(&Snapshot::default());
+        held.discard(&Snapshot::default());
+
+        assert_eq!(held.entries.len(), 3);
+        assert_eq!(held.drafts.all().len(), 1);
+        assert_eq!(held.cursor.spawn(), Some("fix-the-flake-b2c9"));
+    }
+
+    /// The rule that makes one key enough: the *yes* is a key, and everything
+    /// else is the *no*.
+    #[test]
+    fn anything_but_the_answer_takes_a_question_about_a_draft_back() {
+        assert!(!takes_the_question_back(&Asked::Discarded));
+        assert!(!takes_the_question_back(&Asked::Nothing));
+        // The draft takes this one back itself, and swallows the key with it.
+        assert!(!takes_the_question_back(&Asked::Edited(Edit::Typed('x'))));
+
+        for anything_else in [
+            Asked::Moved(Step::Down),
+            Asked::Composed,
+            Asked::Started,
+            Asked::Retired,
+            Asked::Typed(vec![b'a']),
+        ] {
+            assert!(takes_the_question_back(&anything_else));
+        }
     }
 
     #[test]
