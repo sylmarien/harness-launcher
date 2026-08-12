@@ -586,6 +586,30 @@ pub(crate) mod tests {
                 sleep(Duration::from_millis(25));
             }
         }
+
+        /// The same wait as [`Self::until`], but on what a pane has drawn.
+        ///
+        /// `capture-pane` reports a pane's screen *now*, and a child that tmux
+        /// has created but not yet scheduled has drawn nothing — so a bare
+        /// capture asserts on how loaded the machine is as much as on the
+        /// child. Waiting is what makes it a question about the child.
+        pub fn shown_until(&self, pane: &str, ready: impl Fn(&str) -> bool) -> String {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let seen = self
+                    .server
+                    .run(&["capture-pane", "-p", "-t", pane])
+                    .unwrap();
+                if ready(&seen) {
+                    return seen;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "gave up waiting; the pane showed {seen:?}"
+                );
+                sleep(Duration::from_millis(25));
+            }
+        }
     }
 
     impl Drop for PrivateTmux {
@@ -838,10 +862,11 @@ pub(crate) mod tests {
             shown.contains(&format!("{pane} ")),
             "the spawn did not start in the worktree: {shown}"
         );
-        let printed = tmux
-            .server
-            .run(&["capture-pane", "-p", "-t", &pane])
-            .unwrap();
+        // Waited for rather than captured once: the pane's path is right the
+        // moment tmux makes it, but `printenv` has to be scheduled before it
+        // has written anything. Capturing straight after the path check read an
+        // empty screen on a loaded machine and called it a missing variable.
+        let printed = tmux.shown_until(&pane, |seen| seen.contains("probe-value"));
         assert!(
             printed.contains("probe-value"),
             "the recipe's environment did not reach the pane: {printed:?}"
