@@ -9,7 +9,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No `rustup component add`. `rust-toolchain.toml` pins the version and
       # names the components, and rustup installs both on the first cargo call —
