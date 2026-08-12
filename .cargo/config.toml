@@ -1,0 +1,13 @@
+# One definition of "lint", shared by a working copy and by CI.
+#
+# `-D warnings` is what makes clippy's advice binding, and it used to live only
+# in the CI workflow — so the command a developer ran was not the command that
+# decided the build, and clippy could be "clean" locally while CI failed on the
+# identical code. The flags belong somewhere both sides read.
+#
+# `--all-targets` lints the tests too. They are a third of the code and the
+# place a stray `unwrap` is most likely to be excused.
+#
+# Run `cargo lint`. CI runs `cargo lint`. They cannot drift.
+[alias]
+lint = "clippy --all-targets -- -D warnings"

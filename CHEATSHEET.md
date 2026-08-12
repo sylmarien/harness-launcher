@@ -13,6 +13,23 @@ cargo run -- --help          # the models and effort levels on offer
 separates one spawn from the next. With no arguments the app opens with nothing
 running and a draft in the slot; `F5` starts what you write in it.
 
+## Check
+
+```
+cargo fmt --check
+cargo lint                   # clippy over everything, warnings are errors
+cargo test
+```
+
+`cargo lint` is the alias in `.cargo/config.toml`, and CI runs the same three
+commands — so a clean run here is a clean run there. Plain `cargo clippy` is not
+the same check: it prints the warnings and still exits 0.
+
+The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on the
+first `cargo` call, so there is nothing to set up. Dependabot opens a pull
+request when stable moves past the pin, and CI runs on it — so the bump arrives
+knowing whether it is clean.
+
 ## Keys
 
 | Key         | Does                                     |

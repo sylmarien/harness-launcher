@@ -11,8 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Make sure the toolchain has what we lint with
-        run: rustup component add rustfmt clippy
+      # No `rustup component add`. `rust-toolchain.toml` pins the version and
+      # names the components, and rustup installs both on the first cargo call —
+      # so the pin is the only place "our toolchain" is written down, and this
+      # step exists to say out loud which one that turned out to be.
+      - name: Say which toolchain this is
+        run: rustup show active-toolchain && cargo clippy --version
 
       # The tmux tests drive a real tmux on a socket of their own. There is no
       # fake and no abstraction over it: a second implementation existing only
@@ -22,9 +26,10 @@ jobs:
 
       - run: cargo fmt --check
 
-      # --all-targets so the tests are linted too. They are a third of the code
-      # and the place a stray `unwrap` is most likely to be excused.
-      - run: cargo clippy --all-targets -- -D warnings
+      # `cargo lint` is the alias in `.cargo/config.toml`, so this is the same
+      # command a developer runs. The flags used to live here, which is how the
+      # local check and the deciding check came apart.
+      - run: cargo lint
 
       - run: cargo test
 

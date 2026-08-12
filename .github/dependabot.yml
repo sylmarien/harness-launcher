@@ -1,0 +1,77 @@
+# What moves the toolchain pin.
+#
+# `rust-toolchain.toml` fixes the compiler so CI and a working copy lint with
+# the same clippy. The obvious cost of pinning is standing still, so something
+# has to push it forward. This is that something.
+#
+# It replaces a hand-written weekly workflow that opened an issue when stable
+# moved ahead. Dependabot is better at the job in three ways, and the third is
+# the one that decided it:
+#
+#   - it opens a **pull request** that makes the edit, not an issue asking
+#     somebody to;
+#   - that pull request runs CI, so the bump arrives with the answer already
+#     attached — clean, or exactly which check disagrees;
+#   - it is **not a scheduled Actions workflow**, so it is not subject to the
+#     60-day inactivity disablement that would have switched the hand-written
+#     one off silently, in precisely the quiet stretch where a pin goes stale.
+#
+# A GitHub-Actions-authored pull request would not have solved the second point:
+# pull requests created with `GITHUB_TOKEN` do not trigger workflow runs, so the
+# bump would have arrived untested. Dependabot's do.
+version: 2
+
+updates:
+  # Everything here is **monthly** — the first of the month.
+  #
+  # The interval is not how fast an update is available, it is how often you are
+  # asked about one. This is a one-author project with an open pull request at a
+  # time, and a weekly cadence across three ecosystems is a standing queue of
+  # small pull requests competing with the work. Monthly makes each one a thing
+  # you look at rather than something you learn to close unread, and nothing
+  # here is urgent enough to lose by waiting: a bump that matters can always be
+  # made by hand, and security advisories come through Dependabot alerts, which
+  # are a separate channel this schedule does not gate.
+  #
+  # `daily`, `weekly`, `monthly`, `quarterly`, `semiannually`, `yearly` and
+  # `cron` are all accepted, so quarterly is there if monthly still reads as
+  # noise.
+
+  # `rust-toolchain.toml`, matched by the pinned `channel = "1.xx.yy"` form.
+  # Rust releases every six weeks, so a monthly check finds something roughly
+  # two months in three and is never more than a few weeks behind one.
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+
+  # The crates, from `Cargo.toml` and `Cargo.lock`.
+  #
+  # Grouped by how much they can hurt, rather than all into one pull request.
+  # Most of this crate's dependencies are pre-1.0 — `ratatui` 0.30, `vt100`
+  # 0.16, `portable-pty` 0.9 — and under Cargo's semver a 0.x *minor* bump is a
+  # breaking change. Grouping those with patch releases would put a breaking
+  # ratatui bump in the same pull request as a harmless serde_json one, so a red
+  # CI run would say only "something in here broke".
+  #
+  # So: patches together, because they are the ones that are usually noise, and
+  # anything larger on its own where it gets its own diff and its own verdict.
+  # `vt100` especially — §8 of the design record calls the emulator "the
+  # component that has to be right for the product to be usable at all", and
+  # seam 6 exists to test it. A bump to it is a thing to look at, not to skim.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      patches:
+        patterns: ["*"]
+        update-types: ["patch"]
+
+  # The workflows pin their actions too, and those go stale the same way. This
+  # is here because CI is already telling us so: every run currently warns that
+  # `actions/checkout@v4` targets a deprecated Node version.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
