@@ -41,6 +41,48 @@ pub fn prepare(root: &Path, spawn_name: &str) -> Result<PathBuf> {
     Ok(root.join(spawn_name))
 }
 
+/// What the root is holding, by name.
+///
+/// A worktree names itself — the same string as the spawn it belongs to and the
+/// branch it is on — so this is enough for a report to say which piece of work
+/// each leftover came from, rather than only how many there are.
+///
+/// **A root that is not there is nothing found, not a problem.** The app makes
+/// it when it first needs one, so a machine that has never started a spawn has
+/// nothing to report and no reason to hear about it.
+///
+/// **A root that cannot be read is also nothing found**, and that is the one
+/// judgement call here. The alternative is refusing to start the app because a
+/// directory listing failed, which trades a report nobody can act on for a
+/// refusal that stops the work — and this is a report, not a check.
+///
+/// **Directories only, because a worktree is one.** The root is an ordinary
+/// place on disk that anything may leave a file in — an editor's swap file, a
+/// note, a tarball somebody dropped there — and a report that named one as a
+/// worktree would send its reader looking for a checkout of work that was never
+/// started. What cannot be read as a directory at all is skipped for the same
+/// reason: this names leftovers, and a maybe is not a name.
+///
+/// Sorted, so the same leftovers read the same way twice: `read_dir` is in
+/// whatever order the filesystem keeps.
+pub fn under(root: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            entry.file_type().ok()?.is_dir().then_some(())?;
+
+            Some(entry.file_name().to_str()?.to_string())
+        })
+        .collect();
+    found.sort();
+
+    found
+}
+
 /// Resolve the root from the environment, XDG first.
 fn root_from(data_home: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
     let base = match data_home {
@@ -92,6 +134,49 @@ mod tests {
     #[test]
     fn with_nowhere_to_put_worktrees_the_app_refuses() {
         assert!(root_from(None, None).is_err());
+    }
+
+    /// The worktrees name themselves — the same string as the spawn and its
+    /// branch — which is what lets a report say more than "there is stuff here".
+    #[test]
+    fn what_is_left_under_the_root_is_named() {
+        let somewhere = tempfile::tempdir().unwrap();
+        let root = somewhere.path().join("worktrees");
+        fs::create_dir_all(root.join("fix-the-flake-b2c9")).unwrap();
+        fs::create_dir_all(root.join("add-retry-logic-a7f3")).unwrap();
+
+        assert_eq!(
+            under(&root),
+            ["add-retry-logic-a7f3", "fix-the-flake-b2c9"],
+            "the leftovers are not named, in an order that reads the same twice"
+        );
+    }
+
+    /// **A worktree is a directory**, and the root is somewhere anything may
+    /// leave a file. Naming a stray one as a worktree sends the reader looking
+    /// for a checkout of work nobody ever started — which is the report
+    /// inventing exactly the confusion it exists to clear up.
+    #[test]
+    fn a_stray_file_under_the_root_is_not_read_as_a_worktree() {
+        let somewhere = tempfile::tempdir().unwrap();
+        let root = somewhere.path().join("worktrees");
+        fs::create_dir_all(root.join("fix-the-flake-b2c9")).unwrap();
+        fs::write(root.join("notes.txt"), "not a worktree").unwrap();
+
+        assert_eq!(
+            under(&root),
+            ["fix-the-flake-b2c9"],
+            "a file under the root was named as a worktree"
+        );
+    }
+
+    /// The first run on a machine, where the root does not exist yet: nothing
+    /// found, and nothing to say about it.
+    #[test]
+    fn a_root_that_was_never_made_is_holding_nothing() {
+        let somewhere = tempfile::tempdir().unwrap();
+
+        assert!(under(&somewhere.path().join("never-made")).is_empty());
     }
 
     #[test]

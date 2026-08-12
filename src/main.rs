@@ -60,6 +60,7 @@ mod git;
 mod harness;
 mod keys;
 mod list;
+mod litter;
 mod names;
 mod process;
 mod retirement;
@@ -70,17 +71,28 @@ mod supervisor;
 mod tmux;
 mod worktrees;
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use crate::cli::Invocation;
 use crate::creation::{Plan, Wanted};
 use crate::error::{Error, Result};
+use crate::litter::{Leaving, Litter};
+use crate::tmux::Server;
+
+/// What this app calls itself when it is talking to a shell.
+///
+/// Said once because it is said from three places — a refusal, the report on the
+/// way in, the report on the way out — and they are the same voice. Three
+/// literals would let the name this app is installed as drift away from the name
+/// it answers to in the one place somebody would grep for it.
+const SAID: &str = "harness-launcher";
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("harness-launcher: {error}");
+            eprintln!("{SAID}: {error}");
             ExitCode::FAILURE
         }
     }
@@ -131,6 +143,9 @@ fn run() -> Result<()> {
 fn spawn(wanted: &[Wanted]) -> Result<()> {
     let slot = app::slot_now()?;
     let worktrees = worktrees::root()?;
+    let tmux = tmux::Server::app();
+
+    say_what_was_found(&tmux, &worktrees)?;
 
     let plans: Vec<Plan> = wanted
         .iter()
@@ -138,7 +153,15 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
         .collect::<Result<_>>()?;
     create(&plans)?;
 
-    let tmux = tmux::Server::app();
+    // **From here on this run has agents that outlive it**, so from here on the
+    // way out is reported whichever way out it turns out to be. Every `?` below
+    // is one — the third of four spawns refusing to start leaves two running and
+    // used to say nothing about them — and so is the app falling over, which is
+    // exactly when somebody most needs telling that twenty agents are still
+    // going. Made before the session so that a session that cannot be opened is
+    // still a survey of whatever the last run left.
+    let _leaving = Leaving::saying(|| say_what_is_left(&tmux, &worktrees));
+
     let session = tmux.session(slot)?;
     let client = control::Client::attach(&tmux, &session, slot)?;
 
@@ -159,7 +182,7 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
         snapshots: watching.snapshots,
         arriving: watching.arriving,
         leaving: watching.leaving,
-        worktrees,
+        worktrees: worktrees.clone(),
     };
     // A draft is started for somebody who asked for nothing, and only for them:
     // it is the whole of what they asked for, and starting one beside sessions
@@ -173,13 +196,72 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
     app::run(&mut held, &world)
 }
 
+/// Say what an earlier run left behind, once, before this one makes anything.
+///
+/// **Before anything**, and that is the whole of the placement: a moment later
+/// the worktrees this run was asked for exist, and a report taken then would
+/// name them as leftovers of a run that has not finished starting.
+///
+/// **Nothing here is adopted.** The report is a statement about the world — the
+/// list this run carries on with is empty, and everything named stays exactly
+/// where it is. Recovering any of it belongs to a later tranche, and reporting
+/// it is not a step towards that; it is the alternative to it.
+///
+/// A refusal propagates rather than being swallowed. It can only be tmux failing
+/// to run at all, which is the app's next move anyway, and refusing here means
+/// refusing on the shell rather than on a screen that closes behind it.
+///
+/// *Accepted cost:* this lands on the shell a moment before the alternate screen
+/// covers it, so it is read on the way out rather than on the way in — the
+/// original screen comes back when the app leaves, with this still on it and the
+/// leaving report printed under it. *Whether* it should be held back until it
+/// can be read on the way in is deliberately left open by the design record
+/// (§5.3, "the reports"); that both reports land on the shell is not, and the
+/// shell is where every other thing the app says before it takes the screen
+/// already lands.
+fn say_what_was_found(tmux: &Server, worktrees: &Path) -> Result<()> {
+    if let Some(report) = Litter::surveyed(tmux, worktrees)?.found() {
+        println!("{SAID}: {report}");
+    }
+
+    Ok(())
+}
+
+/// Say what this run is leaving behind on its way out.
+///
+/// **Quitting kills nothing** — no signal, no `kill-pane`, no cleanup — and this
+/// is the sentence that keeps that from being a silent surprise: the session to
+/// attach to, how much is still running in it, and where the worktrees are.
+///
+/// Taken from the world rather than from what the app was holding, because by
+/// now they can disagree: a spawn may have stopped on its own, and saying that
+/// four agents are still working when one of them died an hour ago would be
+/// worse than saying nothing.
+///
+/// **A failed survey is said out loud rather than swallowed.** The app is on its
+/// way out and has nothing left to refuse with, but somebody has just been told
+/// nothing about twenty agents that are still running, and silence would read as
+/// "there was nothing to leave".
+fn say_what_is_left(tmux: &Server, worktrees: &Path) {
+    match Litter::surveyed(tmux, worktrees) {
+        Ok(litter) => println!("{SAID}: {}", litter.leaving()),
+        Err(why) => {
+            eprintln!("{SAID}: could not say what is still running, and something is: {why}");
+        }
+    }
+}
+
 /// Make every worktree the plans call for, in order.
 ///
 /// A refusal part-way through leaves the worktrees already made, and **says so
 /// rather than exiting with only the reason the last one failed.** Litter is
 /// accepted here; invisible litter is not, and this is the one place the app can
-/// see what it left behind while it still knows what it made — a start-up report
-/// that rediscovers orphans is a different job, and it is not built yet.
+/// see what it left behind *while it still knows what it made*.
+///
+/// The next run rediscovers it instead — [`say_what_was_found`] names anything under the
+/// worktree root that nothing is running for — but that report can only say what
+/// the names on disk say. This one still has the plan in its hand, which is why
+/// it is worth keeping rather than leaving to the start-up report.
 fn create(plans: &[Plan]) -> Result<()> {
     for (at, plan) in plans.iter().enumerate() {
         if let Err(refused) = plan.create() {
