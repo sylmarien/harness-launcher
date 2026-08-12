@@ -1609,6 +1609,30 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
+    /// **A refusal costs the choices no more than it costs the paragraph.**
+    /// Everything the form collected is still there afterwards — the repository,
+    /// the work, and every option that was picked — so starting it again once
+    /// the machine is fixed is one keystroke rather than filling a form in twice.
+    #[test]
+    fn a_draft_that_could_not_be_started_still_holds_everything_that_was_picked() {
+        let mut drafts = filled_in();
+        let id = only(&drafts).id();
+        drafts.edit(id, Edit::Next);
+        drafts.edit(id, Edit::Up);
+        let asked_for = drafts.submit(id).expect("a draft that says enough");
+
+        drafts.failed(id, "the harness is not installed".to_string());
+        let asked_again = drafts
+            .submit(id)
+            .expect("a draft that stopped can be started again");
+
+        assert_eq!(
+            asked_again, asked_for,
+            "the refusal cost something that was said"
+        );
+        assert_eq!(asked_again.answers, ["red", "small"]);
+    }
+
     #[test]
     fn a_draft_that_could_not_be_started_can_be_started_again() {
         let mut drafts = filled_in();

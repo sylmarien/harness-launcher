@@ -211,6 +211,18 @@ pub struct Listing<'a> {
 }
 
 impl<'a> Listing<'a> {
+    /// What the supervisor last said, for whatever else on the screen needs it.
+    ///
+    /// **One frame, one snapshot.** The list draws every row from it and the
+    /// slot draws the sentence about a spawn it cannot account for from the same
+    /// one — so the drawing is handed the listing and asks it, rather than being
+    /// handed the listing *and* the snapshot it was already made from. Two
+    /// parameters carrying one fact are two chances to draw one frame out of two
+    /// different moments.
+    pub fn snapshot(&self) -> &'a Snapshot {
+        self.snapshot
+    }
+
     /// The list of these drafts and spawns, as this snapshot found them.
     pub fn new(
         drafts: &'a [Draft],
@@ -416,7 +428,7 @@ impl Placed<'_> {
 
     /// Why the app cannot tell what it is doing, when it cannot.
     fn reason(&self) -> Option<&str> {
-        self.row.and_then(|row| row.reason.as_deref())
+        self.row.and_then(Row::reason)
     }
 
     /// How it shows: what is happening to it if anything is, and what its agent
@@ -610,6 +622,7 @@ mod tests {
     use super::*;
     use crate::draft::tests::drafting;
     use crate::scaffolding::SELECTED;
+    use crate::snapshot;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
@@ -652,7 +665,8 @@ mod tests {
         Row {
             name: name.to_string(),
             status,
-            reason: reason.map(str::to_string),
+            unaccounted: reason.map(|why| snapshot::cannot_account(why, None)),
+            last_known: snapshot::last_read(status),
         }
     }
 

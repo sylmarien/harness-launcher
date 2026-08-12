@@ -84,7 +84,8 @@ pub fn default_branch(repository: &Repository) -> Result<String> {
     .ok
     {
         return Err(Error::new(format!(
-            "{path} has no commits yet, so there is nothing to branch from"
+            "{path} has no commits yet, so there is nothing to branch from — make a commit \
+             in it and try again"
         )));
     }
 
@@ -97,7 +98,8 @@ pub fn default_branch(repository: &Repository) -> Result<String> {
     let remotes = process::run_ok("git", &["-C", path, "remote"])?;
     if !remotes.lines().any(|remote| remote == "origin") {
         return Err(Error::new(format!(
-            "{path} has no `origin` remote, so its default branch cannot be resolved"
+            "{path} has no `origin` remote, so its default branch cannot be resolved — add \
+             one with `git remote add origin <url>`"
         )));
     }
 
@@ -268,7 +270,7 @@ pub(crate) mod tests {
     pub(crate) fn repository_with_origin() -> TempDir {
         let root = tempdir().unwrap();
         let origin = root.path().join("origin.git");
-        let clone = root.path().join("project");
+        let clone = clone_path(&root);
 
         git(&["init", "--bare", "-b", "main", origin.to_str().unwrap()]);
         git(&["init", "-b", "main", clone.to_str().unwrap()]);
@@ -293,7 +295,7 @@ pub(crate) mod tests {
     fn a_working_tree_opens() {
         let root = repository_with_origin();
 
-        let repository = open(&root.path().join("project")).unwrap();
+        let repository = open(&clone_path(&root)).unwrap();
 
         assert_eq!(repository.name(), "project");
     }
@@ -301,7 +303,7 @@ pub(crate) mod tests {
     #[test]
     fn opening_a_subdirectory_finds_the_repository_it_belongs_to() {
         let root = repository_with_origin();
-        let nested = root.path().join("project").join("src").join("deep");
+        let nested = clone_path(&root).join("src").join("deep");
         fs::create_dir_all(&nested).unwrap();
 
         let repository = open(&nested).unwrap();
@@ -333,23 +335,38 @@ pub(crate) mod tests {
     #[test]
     fn the_default_branch_comes_from_origins_head() {
         let root = repository_with_origin();
-        let repository = open(&root.path().join("project")).unwrap();
+        let repository = open(&clone_path(&root)).unwrap();
 
         assert_eq!(default_branch(&repository).unwrap(), "origin/main");
     }
 
+    /// Why every one of these says more than "no": a refusal nobody can act on
+    /// stops the work twice — once now, and again when they try the same thing
+    /// having had nothing to go on.
+    fn refusal(repository: &Repository) -> String {
+        default_branch(repository)
+            .expect_err("a base was worked out where there was nothing to work it out from")
+            .to_string()
+    }
+
     #[test]
-    fn a_repository_with_no_commits_is_refused() {
+    fn a_repository_with_no_commits_is_refused_and_told_what_to_do() {
         let root = tempdir().unwrap();
         let empty = root.path().join("empty");
         git(&["init", "-b", "main", empty.to_str().unwrap()]);
         let repository = open(&empty).unwrap();
 
-        assert!(default_branch(&repository).is_err());
+        let refused = refusal(&repository);
+
+        assert!(refused.contains("no commits"), "{refused}");
+        assert!(
+            refused.contains("make a commit"),
+            "nothing says how to make this repository spawnable: {refused}"
+        );
     }
 
     #[test]
-    fn a_repository_with_no_origin_is_refused() {
+    fn a_repository_with_no_origin_is_refused_and_told_what_to_do() {
         let root = tempdir().unwrap();
         let lonely = root.path().join("lonely");
         git(&["init", "-b", "main", lonely.to_str().unwrap()]);
@@ -363,23 +380,35 @@ pub(crate) mod tests {
         ]);
         let repository = open(&lonely).unwrap();
 
-        assert!(default_branch(&repository).is_err());
+        let refused = refusal(&repository);
+
+        assert!(refused.contains("`origin`"), "{refused}");
+        assert!(
+            refused.contains("git remote add origin"),
+            "nothing says how to give it one: {refused}"
+        );
     }
 
     #[test]
-    fn a_detached_head_is_refused() {
+    fn a_detached_head_is_refused_and_told_what_to_do() {
         let root = repository_with_origin();
-        let clone = root.path().join("project");
+        let clone = clone_path(&root);
         git(&["-C", clone.to_str().unwrap(), "checkout", "--detach"]);
         let repository = open(&clone).unwrap();
 
-        assert!(default_branch(&repository).is_err());
+        let refused = refusal(&repository);
+
+        assert!(refused.contains("detached HEAD"), "{refused}");
+        assert!(
+            refused.contains("check out a branch"),
+            "nothing says how to get out of it: {refused}"
+        );
     }
 
     #[test]
-    fn an_origin_without_a_recorded_head_is_refused() {
+    fn an_origin_without_a_recorded_head_is_refused_and_told_what_to_do() {
         let root = repository_with_origin();
-        let clone = root.path().join("project");
+        let clone = clone_path(&root);
         git(&[
             "-C",
             clone.to_str().unwrap(),
@@ -390,13 +419,51 @@ pub(crate) mod tests {
         ]);
         let repository = open(&clone).unwrap();
 
-        assert!(default_branch(&repository).is_err());
+        let refused = refusal(&repository);
+
+        assert!(
+            refused.contains("git remote set-head origin --auto"),
+            "nothing says how to record what origin's HEAD points at: {refused}"
+        );
+    }
+
+    /// **The refusal the whole rule exists for.** A repository carrying both
+    /// `main` and `master` and nothing saying which is the default is exactly
+    /// where a guess would be wrong half the time — and a wrong base means an
+    /// agent working from the wrong code for an hour before anybody notices.
+    ///
+    /// Recorded as its own test rather than left to the one above, because the
+    /// two failures look identical from the outside and only this one is the
+    /// reason no fallback was ever written.
+    #[test]
+    fn a_repository_with_both_main_and_master_is_refused_rather_than_guessed_at() {
+        let root = repository_with_origin();
+        let clone = clone_path(&root);
+        let at = clone.to_str().unwrap();
+        git(&["-C", at, "branch", "master"]);
+        git(&["-C", at, "push", "origin", "master"]);
+        git(&["-C", at, "remote", "set-head", "origin", "--delete"]);
+        let repository = open(&clone).unwrap();
+
+        let refused = refusal(&repository);
+
+        for guess in ["origin/main", "origin/master"] {
+            assert!(
+                !refused.contains(guess),
+                "the app picked a base out of a repository that never said which: {refused}"
+            );
+        }
+    }
+
+    /// The working tree inside a [`repository_with_origin`].
+    fn clone_path(root: &TempDir) -> PathBuf {
+        root.path().join("project")
     }
 
     #[test]
     fn a_worktree_is_created_on_a_branch_of_its_own() {
         let root = repository_with_origin();
-        let repository = open(&root.path().join("project")).unwrap();
+        let repository = open(&clone_path(&root)).unwrap();
         let worktree = root.path().join("worktrees").join("add-retry-logic-a7f3");
 
         add_worktree(
@@ -434,7 +501,7 @@ pub(crate) mod tests {
     #[test]
     fn creating_a_worktree_does_not_write_the_repositorys_config() {
         let root = repository_with_origin();
-        let repository = open(&root.path().join("project")).unwrap();
+        let repository = open(&clone_path(&root)).unwrap();
         let config = repository.path().join(".git").join("config");
         let before = fs::read(&config).unwrap();
 
@@ -461,7 +528,7 @@ pub(crate) mod tests {
     #[test]
     fn a_spawns_branch_does_not_track_the_branch_it_started_from() {
         let root = repository_with_origin();
-        let repository = open(&root.path().join("project")).unwrap();
+        let repository = open(&clone_path(&root)).unwrap();
         let worktree = root.path().join("worktrees").join("add-retry-logic-a7f3");
 
         add_worktree(
@@ -494,7 +561,7 @@ pub(crate) mod tests {
     #[test]
     fn a_worktree_is_never_dropped_onto_an_existing_branch() {
         let root = repository_with_origin();
-        let clone = root.path().join("project");
+        let clone = clone_path(&root);
         git(&["-C", clone.to_str().unwrap(), "branch", "spawn/taken"]);
         let repository = open(&clone).unwrap();
 
@@ -533,7 +600,7 @@ pub(crate) mod tests {
         /// A repository, and a spawn's worktree on a branch of its own.
         pub(crate) fn new() -> Self {
             let root = repository_with_origin();
-            let repository = open(&root.path().join("project")).unwrap();
+            let repository = open(&clone_path(&root)).unwrap();
             let worktree = root.path().join("worktrees").join("add-retry-logic-a7f3");
             add_worktree(&repository, &worktree, BRANCH, "origin/main").unwrap();
 
@@ -542,7 +609,7 @@ pub(crate) mod tests {
 
         /// The repository the worktree belongs to.
         pub(crate) fn repository(&self) -> PathBuf {
-            self.root.path().join("project")
+            clone_path(&self.root)
         }
 
         /// Put a file in the worktree, as an agent working in it would.

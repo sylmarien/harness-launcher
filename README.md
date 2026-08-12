@@ -114,7 +114,10 @@ entirely alone: nothing of the app's ever appears among your own sessions.
 A supervisor thread ticks about five times a second and hands the list an
 immutable snapshot of what every spawn is doing: **working**, **stopped**, or
 **unknown** — the last meaning the app's own instrumentation failed rather than
-anything about the agent, with the reason shown beside the row.
+anything about the agent. The reason reads beside the row, and selecting such a
+spawn puts the whole account in the slot: its pane, the process whose status
+would not resolve, that the pane is alive all the same, and the last status the
+app could read.
 
 `cargo run -- --help` lists the models and effort levels the harness offers.
 

@@ -86,6 +86,9 @@ struct Supervisor {
     records: Records,
     /// What the tie-breaker found, for the spawns it has been run for.
     probes: Probes,
+    /// What it said last time, which is where a spawn it can no longer read
+    /// gets the last status it could.
+    said: Snapshot,
 }
 
 impl Supervisor {
@@ -102,6 +105,7 @@ impl Supervisor {
             departures,
             records: Records::new(),
             probes: Probes::default(),
+            said: Snapshot::default(),
         }
     }
 
@@ -159,7 +163,12 @@ impl Supervisor {
         self.records.forget_all_but(&live);
         self.probes.forget_all_but(&live);
 
-        snapshot::build(&self.watched, &panes, &evidence, at)
+        // The tick before this one is what a spawn the app has *stopped* being
+        // able to read still knows about itself: what it could last tell. Kept
+        // here rather than inside the ladder, which is pure and is handed it.
+        self.said = snapshot::build(&self.watched, &panes, &evidence, at, &self.said);
+
+        self.said.clone()
     }
 }
 

@@ -61,6 +61,19 @@ const HOLDING: &str = "holding";
 /// found together to be changed together.
 const DEAD: &str = "1";
 
+/// The live pane in `captured/tmux-list-panes.txt`, and the process tmux says is
+/// holding it — both read off line 4 of that recording.
+///
+/// Named beside the parser that reads the recording, the way the recording
+/// itself is: these are two more values that came out of a capture rather than
+/// out of somebody's head, and a pane id and a pid transcribed by hand into
+/// three test modules are three places to find when the capture is taken again.
+#[cfg(test)]
+pub(crate) const ALIVE_PANE: &str = "%3";
+/// The process holding [`ALIVE_PANE`], from the same line of the same recording.
+#[cfg(test)]
+pub(crate) const ALIVE_PANE_PID: u32 = 14634;
+
 /// What holds a window open until there is something real to run in it.
 ///
 /// Two jobs. It keeps the session alive before the first spawn and after the
@@ -435,10 +448,10 @@ pub(crate) mod tests {
         let panes = Panes::parse(CAPTURED);
 
         assert_eq!(
-            panes.get("%3"),
+            panes.get(ALIVE_PANE),
             Some(&Pane {
                 dead: false,
-                pid: 14634,
+                pid: ALIVE_PANE_PID,
                 tty: "/dev/pts/3".to_string(),
             })
         );
@@ -453,8 +466,7 @@ pub(crate) mod tests {
     }
 
     /// A real `list-panes -s` from a real tmux — see `captured/README.md`.
-    const CAPTURED_IN_SESSION: &str =
-        include_str!("../captured/tmux-list-panes-in-session.txt");
+    const CAPTURED_IN_SESSION: &str = include_str!("../captured/tmux-list-panes-in-session.txt");
 
     #[test]
     fn the_spawns_a_session_is_holding_are_read_off_the_windows_they_are_in() {

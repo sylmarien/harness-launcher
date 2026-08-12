@@ -21,6 +21,7 @@
 //! the difference between a draft that dies half way leaving a record of the
 //! worktree it made, and one leaving a mystery.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -28,7 +29,7 @@ use std::thread;
 use crate::app::Spawn;
 use crate::control::Client;
 use crate::draft;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::{self, LaunchRecipe};
 use crate::list::Entry;
 use crate::screen::Size;
@@ -74,6 +75,34 @@ impl Plan {
             &self.start_point,
         )
     }
+}
+
+/// Refuse unless the harness this app starts is installed at all.
+///
+/// **Asked before anything is created**, which is the whole of why it is a
+/// function of its own rather than a step of [`plan`]: a machine without the
+/// harness has nothing to start, and finding that out from a pane that dies
+/// would leave a worktree and a branch behind for a session that never ran. No
+/// worktree, no branch, no pane, no litter — the refusal costs the user a
+/// sentence and nothing else.
+///
+/// **The `PATH` is passed in** rather than read here, so this rule is one the
+/// tests can state: read from the environment, the answer would depend on what
+/// happened to be installed on the machine running them.
+///
+/// The two halves of what it says come from either side of the harness seam.
+/// *What* is missing and *what to do about it* are the harness's own facts; that
+/// a program has to be runnable to be started is the app's.
+pub fn harness_installed(path: Option<OsString>) -> Result<()> {
+    let required = harness::requirement();
+    if process::runnable_on(path, required.program) {
+        return Ok(());
+    }
+
+    Err(Error::new(format!(
+        "`{}` is not on PATH, so there is nothing to start a spawn with — {}",
+        required.program, required.fix
+    )))
 }
 
 /// Work out everything about a spawn that can be settled without creating it.
@@ -231,14 +260,21 @@ fn tell(reporting: &Sender<Report>, draft: draft::Id, said: Said) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use tempfile::{TempDir, tempdir};
 
     use crate::control::Grid;
     use crate::git::tests::repository_with_origin as repository;
+    // The same two helpers the module that resolves programs on a `PATH` tests
+    // itself with: a directory holding a runnable program, and a `PATH` made of
+    // directories. Written once there rather than near-copied here, so that a
+    // test about *finding* the harness and a test about *refusing* over it
+    // cannot come to disagree about what "installed" means on disk.
+    use crate::process::tests::{holding, path};
     use crate::screen::tests::shown;
+    use crate::snapshot::{self, Status};
     use crate::tmux::tests::PrivateTmux;
 
     /// Somewhere for the app to put the worktrees this test makes, thrown away
@@ -280,6 +316,36 @@ mod tests {
         }
 
         said
+    }
+
+    /// **The refusal that has to come before every other one.** A machine
+    /// without the harness has nothing to start, and finding that out after the
+    /// worktree exists would leave a branch and a directory behind for a
+    /// session that was never going to run.
+    #[test]
+    fn a_harness_that_is_not_installed_is_refused_and_says_what_to_do() {
+        let nothing_installed = tempdir().unwrap();
+
+        let refused = harness_installed(Some(path(&[&nothing_installed])))
+            .expect_err("a machine with no harness on it started a spawn anyway");
+
+        let said = refused.to_string();
+        let required = harness::requirement();
+        assert!(
+            said.contains(required.program),
+            "the refusal does not say what is missing: {said}"
+        );
+        assert!(
+            said.contains(required.fix),
+            "the refusal does not say what to do about it: {said}"
+        );
+    }
+
+    #[test]
+    fn a_harness_that_is_installed_is_nothing_to_refuse_over() {
+        let installed = holding(harness::requirement().program, true);
+
+        assert!(harness_installed(Some(path(&[&installed]))).is_ok());
     }
 
     #[test]
@@ -385,6 +451,54 @@ mod tests {
         assert!(
             !said.iter().any(|line| line.starts_with("creating")),
             "it got as far as making a worktree: {said:?}"
+        );
+    }
+
+    /// **A worktree that cannot be made says why, and leaves nothing behind
+    /// that the app has not already written down.**
+    ///
+    /// The repository here is one git will plan a spawn from and then refuse to
+    /// check out: origin's HEAD still names a branch whose ref has gone, which
+    /// is what a clone looks like after somebody prunes it. That is the shape of
+    /// the case worth testing — the refusal arrives *after* the app has said
+    /// what it was about to make, which is what makes the difference between
+    /// litter that is written down and litter that is a mystery.
+    #[test]
+    fn a_worktree_that_cannot_be_made_says_why_and_leaves_nothing_half_made() {
+        let root = root();
+        let repository = repository();
+        let clone = repository.path().join("project");
+        crate::git::tests::git(&[
+            "-C",
+            clone.to_str().unwrap(),
+            "update-ref",
+            "-d",
+            "refs/remotes/origin/main",
+        ]);
+
+        let said = reported(wanted(&repository, "add retry logic"), &root);
+
+        let refused = said.last().expect("a creation says something");
+        assert!(
+            refused.starts_with("refused:"),
+            "a worktree git would not make was made anyway: {said:?}"
+        );
+        assert!(
+            refused.contains("origin/main"),
+            "the refusal does not carry git's own account of what went wrong: {refused}"
+        );
+        let about_to = said
+            .iter()
+            .find(|line| line.starts_with("creating the worktree"))
+            .unwrap_or_else(|| panic!("nothing said what was about to be made: {said:?}"));
+        assert!(
+            about_to.contains("spawn/add-retry-logic-"),
+            "the record does not name what it was about to make: {about_to}"
+        );
+        assert!(
+            worktrees::under(root.path()).is_empty(),
+            "something half-made was left under the app's own root: {:?}",
+            worktrees::under(root.path())
         );
     }
 
@@ -494,6 +608,73 @@ mod tests {
                 .get(&started.spawn.pane)
                 .expect("the spawn's pane is not on the server")
                 .dead
+        );
+    }
+
+    /// **A harness that dies the moment it starts is a spawn that stopped**, and
+    /// what it said on its way out is still there to read.
+    ///
+    /// Three things at once, and they are one behaviour: `remain-on-exit` keeps
+    /// the pane so the bytes it drew are still the grid's, the ladder reads a
+    /// dead pane as **stopped** immediately, and there is **no fourth status**
+    /// — a harness that would not start is a spawn that has stopped, which is
+    /// the vocabulary the user already learned. A `failed` added here would be a
+    /// state of the launch rather than of the agent.
+    ///
+    /// Without `remain-on-exit` this fails in a way worth naming: tmux reaps the
+    /// pane, the error goes with it, and the ladder reports a spawn whose pane
+    /// the app cannot find — the app calling its own instrumentation broken over
+    /// something that merely exited.
+    ///
+    /// **The grid outlives tmux's own copy, and that is the point.** Measured
+    /// against tmux 3.4 while writing this: when a pane's process exits, tmux
+    /// *clears the pane* and draws `Pane is dead (status 1, …)` over it, so
+    /// `capture-pane` afterwards no longer has the error at all. What the user
+    /// reads is the app's grid, which is the app's own memory of what it
+    /// observed and is never cleared by anything tmux does to its copy.
+    ///
+    /// **The stand-in lingers before exiting, and that is not padding.** Control
+    /// mode carries only what tmux managed to read from the pty, and a child that
+    /// writes and exits in the same breath races tmux's event loop: measured, a
+    /// `printf` immediately followed by `exit` reaches the app **not at all**,
+    /// and no priming can recover it because tmux has cleared its own copy by
+    /// then. That race is a real limit of the transport rather than a property of
+    /// this test — recorded here because it is invisible from the code and the
+    /// obvious "fix" (priming from `capture-pane` on death) does not work.
+    #[test]
+    fn a_harness_that_dies_on_startup_stays_on_screen_and_reads_as_stopped() {
+        let root = root();
+        let repository = repository();
+        let tmux = PrivateTmux::start("creation-harness-dies-at-once");
+        let session = tmux.server.session(SLOT).unwrap();
+        let client = Client::attach(&tmux.server, &session, SLOT).unwrap();
+        let mut plan = plan(&wanted(&repository, "add retry logic"), root.path()).unwrap();
+        plan.create().unwrap();
+        plan.recipe = tmux.recipe("printf 'not logged in\\n'; sleep 0.4; exit 1");
+
+        let started = start(&tmux.server, &session, &client, SLOT, plan).unwrap();
+        tmux.until("#{pane_dead}", |seen| seen.contains('1'));
+
+        until(&started.spawn.grid, "not logged in");
+        let snapshot = snapshot::build(
+            std::slice::from_ref(&started.watched),
+            &tmux.server.panes().unwrap(),
+            &HashMap::new(),
+            Instant::now(),
+            &snapshot::Snapshot::default(),
+        );
+        let row = snapshot
+            .of(&started.spawn.entry.spawn)
+            .expect("a watched spawn has a row");
+        assert_eq!(
+            row.status,
+            Status::Stopped,
+            "a harness that would not start was given a status of its own: {row:?}"
+        );
+        assert_eq!(
+            row.reason(),
+            None,
+            "a spawn that simply stopped was reported as something the app cannot account for"
         );
     }
 }
