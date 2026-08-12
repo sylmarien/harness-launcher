@@ -93,7 +93,7 @@ const HOLDER: [&str; 3] = ["sh", "-c", "while :; do sleep 3600; done"];
 /// — which is a different thing, and reported differently.
 const PANE_FORMAT: &str = "#{pane_id} #{pane_dead} #{pane_pid} #{pane_tty}";
 
-/// What the reports ask about every window of the holding session.
+/// What the reports ask about every window of the session the spawns live in.
 ///
 /// The window's name, which is the spawn's name, and whether what ran in it has
 /// stopped. Two fields, because a report says what is still running and names
@@ -259,8 +259,12 @@ impl Server {
         Ok(())
     }
 
-    /// The spawns still running in the holding session, or nothing at all if
-    /// there is no session to ask about.
+    /// The spawns still running in the one session they are windows of, or
+    /// nothing at all if there is no session to ask about.
+    ///
+    /// **There is no *holding session*** — that was parking, and parking is
+    /// gone. What is held is a single *window*, [`HOLDING`], which is furniture
+    /// keeping the session alive and is filtered out below.
     ///
     /// **This is the question both reports are**, and it is asked without
     /// making anything: `has-session` first, so that a report taken before the

@@ -23,9 +23,9 @@ use crate::worktrees;
 
 /// What the app has running and on disk, at one moment.
 pub struct Litter {
-    /// The spawns still running in the holding session, or nothing at all when
-    /// there is no session — which is a machine that has not run this since it
-    /// last started.
+    /// The spawns still running in the session they are windows of, or nothing
+    /// at all when there is no session — which is a machine that has not run
+    /// this since it last started.
     running: Option<Vec<String>>,
     /// Where the worktrees go.
     root: PathBuf,
