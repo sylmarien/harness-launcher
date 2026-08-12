@@ -41,6 +41,8 @@ pub struct Watching {
     pub snapshots: Receiver<Snapshot>,
     /// Spawns made since it started, which the next tick picks up.
     pub arriving: Sender<Watched>,
+    /// Spawns retired since it started, which the next tick lets go of.
+    pub leaving: Sender<String>,
 }
 
 /// Start watching, and hand back the snapshots.
@@ -54,9 +56,10 @@ pub struct Watching {
 pub fn watch(server: Server, watched: Vec<Watched>) -> Watching {
     let (sending, snapshots) = mpsc::channel();
     let (arriving, arrivals) = mpsc::channel();
+    let (leaving, departures) = mpsc::channel();
 
     thread::spawn(move || {
-        let mut supervisor = Supervisor::new(server, watched, arrivals);
+        let mut supervisor = Supervisor::new(server, watched, arrivals, departures);
         while sending.send(supervisor.tick()).is_ok() {
             thread::sleep(TICK);
         }
@@ -65,6 +68,7 @@ pub fn watch(server: Server, watched: Vec<Watched>) -> Watching {
     Watching {
         snapshots,
         arriving,
+        leaving,
     }
 }
 
@@ -76,6 +80,8 @@ struct Supervisor {
     watched: Vec<Watched>,
     /// Spawns made since it started looking, waiting to be taken up.
     arrivals: Receiver<Watched>,
+    /// Spawns retired since it started looking, waiting to be let go of.
+    departures: Receiver<String>,
     /// What the harness's records said.
     records: Records,
     /// What the tie-breaker found, for the spawns it has been run for.
@@ -83,11 +89,17 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    fn new(server: Server, watched: Vec<Watched>, arrivals: Receiver<Watched>) -> Self {
+    fn new(
+        server: Server,
+        watched: Vec<Watched>,
+        arrivals: Receiver<Watched>,
+        departures: Receiver<String>,
+    ) -> Self {
         Self {
             server,
             watched,
             arrivals,
+            departures,
             records: Records::new(),
             probes: Probes::default(),
         }
@@ -102,10 +114,19 @@ impl Supervisor {
     /// ago is in this snapshot rather than the next: a row that appears in the
     /// list and says nothing for a fifth of a second reads as the app
     /// hesitating about something it just did itself.
+    ///
+    /// **And spawns that have been retired are let go of before anything is
+    /// asked about them**, for the mirror image of the same reason: a
+    /// retirement takes the pane away, so a spawn still watched a tick later is
+    /// one this would report as a pane it cannot find — the app claiming its
+    /// own instrumentation is broken about something it just did itself.
     fn tick(&mut self) -> Snapshot {
         let at = Instant::now();
         while let Ok(arrival) = self.arrivals.try_recv() {
             self.watched.push(arrival);
+        }
+        while let Ok(retired) = self.departures.try_recv() {
+            self.watched.retain(|spawn| spawn.name != retired);
         }
         let panes = self.server.panes().unwrap_or_default();
 
@@ -613,6 +634,57 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "the supervisor never picked up the spawn it was told about"
+            );
+        }
+    }
+
+    /// A spawn that has been retired stops being reported at all — and in
+    /// particular does not come back as a pane the app cannot find, which is
+    /// what a retired spawn still being watched looks like the moment its
+    /// window goes.
+    #[test]
+    fn a_spawn_that_has_been_retired_is_let_go_of() {
+        let tmux = PrivateTmux::start("supervisor-lets-go-of-a-retired-spawn");
+        let session = tmux
+            .server
+            .session(Size {
+                columns: 40,
+                rows: 10,
+            })
+            .unwrap();
+        let pane = tmux
+            .server
+            .open_window(&session, "add-retry-logic-a7f3")
+            .unwrap();
+        let watching = watch(
+            tmux.server.clone(),
+            vec![Watched::new("add-retry-logic-a7f3".to_string(), pane)],
+        );
+        until(&watching, |snapshot| {
+            snapshot.of("add-retry-logic-a7f3").is_some()
+        });
+
+        watching
+            .leaving
+            .send("add-retry-logic-a7f3".to_string())
+            .unwrap();
+
+        until(&watching, |snapshot| {
+            snapshot.of("add-retry-logic-a7f3").is_none()
+        });
+    }
+
+    /// Wait for the supervisor to say something, or give up.
+    fn until(watching: &Watching, said: impl Fn(&Snapshot) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = watching.snapshots.recv().unwrap();
+            if said(&snapshot) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the supervisor never said it: {snapshot:?}"
             );
         }
     }

@@ -237,50 +237,9 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use crate::control::Grid;
+    use crate::git::tests::repository_with_origin as repository;
     use crate::screen::tests::shown;
     use crate::tmux::tests::PrivateTmux;
-
-    /// Run a git command in a test repository, failing loudly if it does not
-    /// work.
-    fn git(arguments: &[&str]) {
-        let mut full = vec![
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "commit.gpgsign=false",
-        ];
-        full.extend_from_slice(arguments);
-
-        let outcome = process::run("git", &full).unwrap();
-        assert!(outcome.ok, "git {arguments:?} failed: {}", outcome.stderr);
-    }
-
-    /// A repository with one commit, an `origin`, and a recorded default
-    /// branch — the least a spawn can be started against.
-    fn repository() -> TempDir {
-        let root = tempdir().unwrap();
-        let origin = root.path().join("origin.git");
-        let clone = root.path().join("project");
-
-        git(&["init", "--bare", "-b", "main", origin.to_str().unwrap()]);
-        git(&["init", "-b", "main", clone.to_str().unwrap()]);
-        let clone = clone.to_str().unwrap();
-        git(&["-C", clone, "commit", "--allow-empty", "-m", "first"]);
-        git(&[
-            "-C",
-            clone,
-            "remote",
-            "add",
-            "origin",
-            origin.to_str().unwrap(),
-        ]);
-        git(&["-C", clone, "push", "-u", "origin", "main"]);
-        git(&["-C", clone, "remote", "set-head", "origin", "--auto"]);
-
-        root
-    }
 
     /// Somewhere for the app to put the worktrees this test makes, thrown away
     /// with the test rather than left in whoever is running it's home.

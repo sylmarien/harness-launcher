@@ -1,0 +1,45 @@
+# Cheat sheet
+
+## Run
+
+```
+cargo run                    # opens on a blank form — write the work there
+cargo run -- <repository> "<the work>" [--model <id>] [--level <id>]
+cargo run -- <repository> "<the work>" --and <other-repository> "<more work>"
+cargo run -- --help          # the models and effort levels on offer
+```
+
+`<repository>` is a local git repository, or any directory inside one. `--and`
+separates one spawn from the next. With no arguments the app opens with nothing
+running and a draft in the slot; `F5` starts what you write in it.
+
+## Keys
+
+| Key         | Does                                     |
+| ----------- | ---------------------------------------- |
+| `F2`        | start a draft                            |
+| `F5`        | make the draft in the slot into a spawn  |
+| `F6` / `F7` | move the selection up / down             |
+| `F9`        | retire the selected spawn                |
+| `F10`       | quit — nothing is killed                 |
+
+Every other key goes to whatever is in the slot: to the session, or to the draft.
+
+In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
+`Enter` is a new line in the work and moves on everywhere else.
+
+## Marks in the list
+
+- Spawns — `·` working · `●` stopped · `?` the app cannot tell · `-` being retired
+- Drafts — `+` being written · `>` being made into a spawn
+- Either — `!` it stopped, or would not retire · `▍` the selected row
+
+## Worth knowing
+
+- **Quitting kills nothing.** The sessions outlive the app —
+  `tmux -L harness-launcher attach` finds them.
+- **Retiring** stops the session, removes the worktree and **keeps the branch**.
+  It refuses if anything in the worktree is uncommitted: clean up, press `F9`
+  again.
+- Worktrees live under `$XDG_DATA_HOME/harness-launcher/worktrees`
+  (`~/.local/share/...` when that is unset).

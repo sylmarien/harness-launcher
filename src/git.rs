@@ -175,14 +175,79 @@ pub fn add_worktree(
     Ok(())
 }
 
+/// What is in a worktree that is not committed — nothing at all when it is
+/// clean.
+///
+/// **The flags are the whole of this function, and they are passed explicitly
+/// on purpose.** git's own `worktree remove` runs this same status *without*
+/// `-u`, so it honours the user's `status.showUntrackedFiles` — and with that
+/// set to `no`, which is a real setting on large repositories, git's check goes
+/// blind to untracked files and removes an agent's never-staged work.
+/// `--ignore-submodules=none` is the same rule for `diff.ignoreSubmodules` and
+/// `submodule.<name>.ignore`: a setting of the user's must not be able to
+/// decide what the app is allowed to delete.
+///
+/// **Ignored files do not count**, which matches git and is the only usable
+/// answer: count them and no worktree in a project that builds is ever
+/// retirable. The cost is real — a spawn's untracked-but-ignored configuration
+/// goes with the worktree — and is recorded rather than hidden. **Stashes do
+/// not count either, and that is genuinely safe**: a stash made in a worktree
+/// lives in the repository's stash list and survives the worktree going.
+///
+/// **Known blind spot:** a file marked `--assume-unchanged` never appears in
+/// status at all, so it is invisible to any check built on one.
+pub fn uncommitted(worktree: &Path) -> Result<String> {
+    process::run_ok(
+        "git",
+        &[
+            "-C",
+            path_argument(worktree)?,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    )
+}
+
+/// Remove a worktree, and leave its branch alone.
+///
+/// The branch holds committed work: removing a checkout and deleting the
+/// history checked out in it are different acts, and only the first is the
+/// app's to take. It also makes the names worth reading months later, which is
+/// what they were built for.
+///
+/// This is git's own removal, with git's own refusals, and it is asked *after*
+/// the app's explicit check in [`uncommitted`] has already passed — so what is
+/// left for it to object to is not work in the worktree. **`--force` is not
+/// passed**, deliberately: the app's check is the stricter of the two, and
+/// leaving git's own in place is a second pair of eyes on the seconds between
+/// the check and the removal.
+///
+/// *The consequence, recorded rather than hidden:* git refuses outright to
+/// remove a worktree containing submodules, so **a spawn on a repository with
+/// submodules cannot be retired by the app at all** — its session stops, and the
+/// refusal the user reads is git's own sentence about it. Removing it by hand is
+/// then a `git worktree remove --force` they can take responsibility for.
+pub fn remove_worktree(worktree: &Path) -> Result<()> {
+    let path = path_argument(worktree)?;
+    process::run_ok("git", &["-C", path, "worktree", "remove", path])?;
+
+    Ok(())
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use tempfile::{TempDir, tempdir};
 
     /// Run a git command in a test repository, failing loudly if it does not work.
-    fn git(arguments: &[&str]) {
+    ///
+    /// Shared with every other module that needs a repository to work against,
+    /// for the same reason the tmux tests share one server: a second way of
+    /// building a test repository is a second set of defaults to keep in step.
+    pub(crate) fn git(arguments: &[&str]) {
         let mut full = vec![
             "-c",
             "user.name=Test",
@@ -198,7 +263,9 @@ mod tests {
     }
 
     /// A repository with one commit, an `origin`, and a recorded default branch.
-    fn repository_with_origin() -> TempDir {
+    ///
+    /// The repository itself is `project`, inside the directory handed back.
+    pub(crate) fn repository_with_origin() -> TempDir {
         let root = tempdir().unwrap();
         let origin = root.path().join("origin.git");
         let clone = root.path().join("project");
@@ -439,5 +506,227 @@ mod tests {
         );
 
         assert!(refused.is_err());
+    }
+
+    // What is in a worktree, and what removing one does. Every one of these
+    // runs against a throwaway repository rather than a fake: the whole point
+    // of the rule is that it is git's own answer, asked the app's own way.
+
+    /// The branch every worktree below is on.
+    pub(crate) const BRANCH: &str = "spawn/add-retry-logic-a7f3";
+
+    /// A repository with a spawn's worktree on it, ready to be dirtied.
+    ///
+    /// Shared with the retirement tests, which need exactly this and a session
+    /// running in it. The worktree is made the way the app makes one rather
+    /// than by hand, so a test can never be working against a checkout the app
+    /// would not have produced.
+    pub(crate) struct Spawned {
+        /// The directory the repository and the worktree both live under, kept
+        /// so that both go when the test does.
+        root: TempDir,
+        /// The worktree itself, which is what everything here is about.
+        pub(crate) worktree: PathBuf,
+    }
+
+    impl Spawned {
+        /// A repository, and a spawn's worktree on a branch of its own.
+        pub(crate) fn new() -> Self {
+            let root = repository_with_origin();
+            let repository = open(&root.path().join("project")).unwrap();
+            let worktree = root.path().join("worktrees").join("add-retry-logic-a7f3");
+            add_worktree(&repository, &worktree, BRANCH, "origin/main").unwrap();
+
+            Self { root, worktree }
+        }
+
+        /// The repository the worktree belongs to.
+        pub(crate) fn repository(&self) -> PathBuf {
+            self.root.path().join("project")
+        }
+
+        /// Put a file in the worktree, as an agent working in it would.
+        pub(crate) fn wrote(&self, name: &str, what: &str) {
+            fs::write(self.worktree.join(name), what).unwrap();
+        }
+
+        /// Commit what is in the worktree, so there is something tracked to
+        /// change afterwards — and, for the retirement tests, so there is work
+        /// the branch has to be left holding.
+        pub(crate) fn committed(&self, what: &str) {
+            let worktree = self.worktree.to_str().unwrap();
+            git(&["-C", worktree, "add", "--all"]);
+            git(&["-C", worktree, "commit", "-m", what]);
+        }
+
+        /// Set something in the repository's own configuration — which is to
+        /// say, the user's setting, which the worktree inherits.
+        pub(crate) fn user_set(&self, setting: &str, value: &str) {
+            git(&[
+                "-C",
+                self.repository().to_str().unwrap(),
+                "config",
+                setting,
+                value,
+            ]);
+        }
+
+        /// The branches the repository has.
+        pub(crate) fn branches(&self) -> String {
+            process::run_ok(
+                "git",
+                &[
+                    "-C",
+                    self.repository().to_str().unwrap(),
+                    "branch",
+                    "--list",
+                ],
+            )
+            .unwrap()
+        }
+
+        /// What is uncommitted, as the app asks it.
+        fn uncommitted(&self) -> String {
+            uncommitted(&self.worktree).unwrap()
+        }
+
+        /// What git would say about the worktree without the app's flags —
+        /// which is what the user's configuration is free to decide.
+        fn as_the_user_configured_it(&self) -> String {
+            process::run_ok(
+                "git",
+                &[
+                    "-C",
+                    self.worktree.to_str().unwrap(),
+                    "status",
+                    "--porcelain",
+                ],
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn a_worktree_nobody_has_touched_has_nothing_uncommitted_in_it() {
+        let spawned = Spawned::new();
+
+        assert_eq!(spawned.uncommitted(), "");
+    }
+
+    #[test]
+    fn a_tracked_file_an_agent_changed_is_uncommitted_work() {
+        let spawned = Spawned::new();
+        spawned.wrote("notes.md", "as committed\n");
+        spawned.committed("notes");
+
+        spawned.wrote("notes.md", "and then changed\n");
+
+        assert!(spawned.uncommitted().contains("notes.md"));
+    }
+
+    /// **The flagship, and the reason the flags are passed at all.** With
+    /// `status.showUntrackedFiles` set to `no` — a real setting on large
+    /// repositories — git's own check goes blind to a file an agent wrote and
+    /// never staged, and `git worktree remove` deletes it without a word. The
+    /// app's check is the same command with the flag put back.
+    #[test]
+    fn an_untracked_file_counts_even_where_the_users_own_git_would_not_see_it() {
+        let spawned = Spawned::new();
+        spawned.user_set("status.showUntrackedFiles", "no");
+        spawned.wrote("notes.md", "an hour of an agent's work, never staged\n");
+
+        assert_eq!(
+            spawned.as_the_user_configured_it(),
+            "",
+            "the setting this test is about is not in force, so it proves nothing"
+        );
+        assert!(
+            spawned.uncommitted().contains("notes.md"),
+            "a file the user's own git cannot see was about to be deleted with the worktree"
+        );
+    }
+
+    /// The same rule for the other flag: a setting of the user's must not be
+    /// able to decide what the app is allowed to delete.
+    #[test]
+    fn a_changed_submodule_counts_even_where_the_users_own_git_ignores_submodules() {
+        let spawned = Spawned::new();
+        let elsewhere = tempdir().unwrap();
+        let library = elsewhere.path().join("library");
+        git(&["init", "-b", "main", library.to_str().unwrap()]);
+        fs::write(library.join("shipped.txt"), "as shipped\n").unwrap();
+        git(&["-C", library.to_str().unwrap(), "add", "--all"]);
+        git(&["-C", library.to_str().unwrap(), "commit", "-m", "shipped"]);
+
+        let worktree = spawned.worktree.to_str().unwrap();
+        git(&[
+            "-c",
+            "protocol.file.allow=always",
+            "-C",
+            worktree,
+            "submodule",
+            "add",
+            library.to_str().unwrap(),
+            "vendor",
+        ]);
+        spawned.committed("vendor");
+        spawned.user_set("diff.ignoreSubmodules", "all");
+        spawned.wrote("vendor/shipped.txt", "and then changed\n");
+
+        assert_eq!(
+            spawned.as_the_user_configured_it(),
+            "",
+            "the setting this test is about is not in force, so it proves nothing"
+        );
+        assert!(
+            spawned.uncommitted().contains("vendor"),
+            "work inside a submodule was about to be deleted with the worktree"
+        );
+    }
+
+    /// Recorded rather than hidden: ignored files do not count, and they go
+    /// with the worktree. Counting them is the alternative, and it is unusable
+    /// — no worktree in a project that builds would ever be retirable.
+    #[test]
+    fn an_ignored_file_does_not_count_and_goes_with_the_worktree() {
+        let spawned = Spawned::new();
+        spawned.wrote(".gitignore", "secrets\n");
+        spawned.committed("ignore secrets");
+        spawned.wrote("secrets", "the spawn's own configuration\n");
+
+        assert_eq!(spawned.uncommitted(), "");
+
+        remove_worktree(&spawned.worktree).unwrap();
+
+        assert!(!spawned.worktree.exists());
+    }
+
+    #[test]
+    fn removing_a_worktree_takes_the_checkout_and_leaves_the_branch() {
+        let spawned = Spawned::new();
+        let repository = spawned.repository();
+        let repository = repository.to_str().unwrap();
+
+        remove_worktree(&spawned.worktree).unwrap();
+
+        assert!(!spawned.worktree.exists(), "the checkout is still there");
+        assert!(
+            !process::run_ok("git", &["-C", repository, "worktree", "list"])
+                .unwrap()
+                .contains("add-retry-logic-a7f3"),
+            "the worktree's own metadata was left behind"
+        );
+        assert!(
+            spawned.branches().contains(BRANCH),
+            "the branch went with the worktree, taking committed work with it: {}",
+            spawned.branches()
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_is_not_there_is_a_refusal_rather_than_a_removal() {
+        let root = tempdir().unwrap();
+
+        assert!(remove_worktree(&root.path().join("nowhere")).is_err());
     }
 }

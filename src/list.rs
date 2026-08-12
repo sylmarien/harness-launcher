@@ -37,6 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::draft::{self, Draft};
+use crate::retirement::{Retirement, Retirements};
 use crate::scaffolding::{AMBER, DIM, ELLIPSIS, HEADING, gutter};
 use crate::scaffolding::{Footer, elided, scroll_offset, wrapped};
 use crate::snapshot::{Row, Snapshot, Status};
@@ -51,8 +52,20 @@ const DRAFT: &str = "+";
 /// The mark against a draft that is being made into a spawn.
 const STARTING: &str = ">";
 
-/// The mark against a draft that was started and could not be.
+/// The mark against a draft that was started and could not be, and against a
+/// spawn that would not retire.
+///
+/// One mark for both because they are one thing from where the user sits: the
+/// app saying *this one is on you*, in the same amber it admits everything else
+/// in.
 const STOPPED: &str = "!";
+
+/// The mark against a spawn being retired.
+///
+/// Not one of the status marks either. A spawn being retired is not doing
+/// anything — what its agent was up to stopped being the question the moment
+/// somebody said they were done with it.
+const RETIRING: &str = "-";
 
 /// How far a row's text sits from the left: the selection's gutter, the status
 /// mark, and the space between that and the name.
@@ -60,19 +73,22 @@ const INDENT: usize = 3;
 
 /// What the foot of the list says the keyboard does.
 ///
-/// Three keys and a promise. The promise is the one the whole design rests on
+/// Four keys and a promise. The promise is the one the whole design rests on
 /// and the one nobody would guess: leaving does not stop anything. Starting a
 /// draft is on the list rather than anywhere else because a draft that does not
-/// exist yet has nowhere else to be announced.
-/// The shortest list that can still spare three of its rows for the footer is
-/// seven: four rows of spawns is the least that reads as a list at all.
+/// exist yet has nowhere else to be announced, and retiring is here because the
+/// list is where a spawn is chosen — it acts on the row rather than on what is
+/// in the slot.
+/// The shortest list that can still spare four of its rows for the footer is
+/// eight: four rows of spawns is the least that reads as a list at all.
 const FOOTER: Footer = Footer::new(
     &[
         "F2 starts a draft",
         "F6 / F7 move the selection",
+        "F9 retires the spawn",
         "F10 quits — nothing is killed",
     ],
-    7,
+    8,
 );
 
 /// What the list has to say about a spawn.
@@ -188,6 +204,8 @@ pub struct Listing<'a> {
     entries: &'a [Entry],
     /// What the supervisor last said they were doing.
     snapshot: &'a Snapshot,
+    /// Which of them are being retired, and what came of it.
+    retirements: &'a Retirements,
     /// Which row the list is on.
     cursor: &'a Cursor,
 }
@@ -198,12 +216,14 @@ impl<'a> Listing<'a> {
         drafts: &'a [Draft],
         entries: &'a [Entry],
         snapshot: &'a Snapshot,
+        retirements: &'a Retirements,
         cursor: &'a Cursor,
     ) -> Self {
         Self {
             drafts,
             entries,
             snapshot,
+            retirements,
             cursor,
         }
     }
@@ -221,7 +241,10 @@ impl<'a> Listing<'a> {
             lines.push(drafted(draft, on_it, width));
         }
 
-        for (at, group) in grouped(self.entries, self.snapshot).iter().enumerate() {
+        for (at, group) in grouped(self.entries, self.snapshot, self.retirements)
+            .iter()
+            .enumerate()
+        {
             if at > 0 || !self.drafts.is_empty() {
                 lines.push(Line::raw(""));
             }
@@ -311,12 +334,17 @@ impl Widget for Listing<'_> {
 /// The order the list moves through has to be the order it shows, or a
 /// keystroke asking for the next row lands somewhere else on screen. Both come
 /// from here.
+///
+/// **Nothing about a retirement moves a row**, which is why this asks about
+/// none: the selection is on the spawn being retired, and a row that re-sorted
+/// as its retirement started would take itself out from under the hand that
+/// asked for it.
 pub fn order(drafts: &[Draft], entries: &[Entry], snapshot: &Snapshot) -> Vec<On> {
     let pinned = drafts.iter().map(|draft| On::Draft(draft.id()));
 
     pinned
         .chain(
-            grouped(entries, snapshot)
+            grouped(entries, snapshot, &Retirements::default())
                 .into_iter()
                 .flat_map(|group| group.spawns)
                 .map(|placed| On::Spawn(placed.entry.spawn.clone())),
@@ -371,6 +399,8 @@ struct Placed<'a> {
     entry: &'a Entry,
     /// What the snapshot said about it, if it held it at all.
     row: Option<&'a Row>,
+    /// Where its retirement has got to, if it is being retired at all.
+    retirement: Option<&'a Retirement>,
 }
 
 impl Placed<'_> {
@@ -389,22 +419,42 @@ impl Placed<'_> {
         self.row.and_then(|row| row.reason.as_deref())
     }
 
+    /// How it shows: what is happening to it if anything is, and what its agent
+    /// is doing otherwise.
+    ///
+    /// **A retirement outranks a status**, because it outranks it in what the
+    /// user is being told: a spawn somebody has said they are done with is not
+    /// a spawn to go and look at, whatever its agent was in the middle of.
+    fn shown(&self) -> Shown {
+        match self.retirement {
+            Some(retirement) if retirement.refused() => Shown {
+                mark: STOPPED,
+                how_it_reads: HEADING.fg(AMBER),
+            },
+            Some(_) => Shown {
+                mark: RETIRING,
+                how_it_reads: Style::new().fg(Color::DarkGray),
+            },
+            None => shown_as(self.status()),
+        }
+    }
+
     /// Its status, as the one mark a header's bar is made of.
     fn mark(&self) -> Span<'static> {
-        shown_as(self.status()).span()
+        self.shown().span()
     }
 
     /// Its own line: the gutter, its status, and its name.
     fn row(&self, selected: bool, width: usize) -> Line<'static> {
-        let shown_as = shown_as(self.status());
+        let shown = self.shown();
 
         Line::from(vec![
             gutter(selected),
-            shown_as.span(),
+            shown.span(),
             Span::raw(" "),
             Span::styled(
                 elided(self.name(), width.saturating_sub(INDENT)),
-                shown_as.how_it_reads,
+                shown.how_it_reads,
             ),
         ])
     }
@@ -415,6 +465,9 @@ impl Placed<'_> {
     /// what the app made and the user did not, and the reason is a sentence: on
     /// every row they would cost twenty spawns sixty lines, which is the density
     /// the list is for. Selecting a row is how you go and read them.
+    ///
+    /// A retirement's own sentence goes last, because it is the newest thing to
+    /// have happened — and a refused one is what the user is looking for.
     fn detail(&self, width: usize) -> Vec<Line<'static>> {
         let room = width.saturating_sub(INDENT);
 
@@ -429,6 +482,18 @@ impl Placed<'_> {
                     .map(|line| indented(line, DIM.fg(AMBER))),
             );
         }
+        if let Some(retirement) = self.retirement {
+            let how_it_reads = if retirement.refused() {
+                DIM.fg(AMBER)
+            } else {
+                DIM
+            };
+            lines.extend(
+                wrapped(retirement.said(), room)
+                    .iter()
+                    .map(|line| indented(line, how_it_reads)),
+            );
+        }
 
         lines
     }
@@ -440,13 +505,18 @@ impl Placed<'_> {
 /// statuses keep it too — the sort is stable, and that is load-bearing. A list
 /// that reshuffled its working spawns every tick would be unreadable, and the
 /// only thing that ever moves a row is a status actually changing.
-fn grouped<'a>(entries: &'a [Entry], snapshot: &'a Snapshot) -> Vec<Group<'a>> {
+fn grouped<'a>(
+    entries: &'a [Entry],
+    snapshot: &'a Snapshot,
+    retirements: &'a Retirements,
+) -> Vec<Group<'a>> {
     let mut groups: Vec<Group<'a>> = Vec::new();
 
     for entry in entries {
         let placed = Placed {
             entry,
             row: snapshot.of(&entry.spawn),
+            retirement: retirements.of(&entry.spawn),
         };
 
         match groups
@@ -610,8 +680,19 @@ mod tests {
         snapshot: &Snapshot,
         cursor: &Cursor,
     ) -> String {
-        let buffer = painted(width, height, drafts, entries, snapshot, cursor);
+        read(&painted(
+            width,
+            height,
+            drafts,
+            entries,
+            snapshot,
+            &Retirements::default(),
+            cursor,
+        ))
+    }
 
+    /// What a buffer says, as the text a test can be written against.
+    fn read(buffer: &Buffer) -> String {
         (0..buffer.area.height)
             .map(|row| {
                 (0..buffer.area.width)
@@ -631,19 +712,39 @@ mod tests {
         drafts: &[Draft],
         entries: &[Entry],
         snapshot: &Snapshot,
+        retirements: &Retirements,
         cursor: &Cursor,
     ) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 frame.render_widget(
-                    Listing::new(drafts, entries, snapshot, cursor),
+                    Listing::new(drafts, entries, snapshot, retirements, cursor),
                     frame.area(),
                 );
             })
             .unwrap();
 
         terminal.backend().buffer().clone()
+    }
+
+    /// The same, with some of the spawns being retired.
+    fn while_retiring(
+        width: u16,
+        height: u16,
+        entries: &[Entry],
+        retirements: &Retirements,
+        cursor: &Cursor,
+    ) -> String {
+        read(&painted(
+            width,
+            height,
+            &[],
+            entries,
+            &saying(None),
+            retirements,
+            cursor,
+        ))
     }
 
     /// The names of the spawns an order walks, in the order it walks them.
@@ -659,7 +760,7 @@ mod tests {
 
     #[test]
     fn spawns_group_under_their_repository_attention_first() {
-        let screen = drawn(30, 13, &five(), &saying(None), &Cursor::default());
+        let screen = drawn(30, 14, &five(), &saying(None), &Cursor::default());
 
         assert_eq!(
             screen,
@@ -676,6 +777,7 @@ acme-api ●·
  · rate-limit-headers
 F2 starts a draft
 F6 / F7 move the selection
+F9 retires the spawn
 F10 quits — nothing is killed"
         );
     }
@@ -684,7 +786,7 @@ F10 quits — nothing is killed"
     fn the_selection_is_a_mark_in_the_gutter_and_the_spawn_beneath_it() {
         let screen = drawn(
             34,
-            15,
+            16,
             &five(),
             &saying(None),
             &Cursor::on_spawn("add-retry-logic"),
@@ -707,6 +809,7 @@ acme-api ●·
  · rate-limit-headers
 F2 starts a draft
 F6 / F7 move the selection
+F9 retires the spawn
 F10 quits — nothing is killed"
         );
     }
@@ -715,7 +818,7 @@ F10 quits — nothing is killed"
     fn the_reason_an_unknown_spawn_is_unknown_reads_under_the_selected_row() {
         let screen = drawn(
             30,
-            17,
+            18,
             &five(),
             &saying(Some("its session record carries no status")),
             &Cursor::on_spawn("spawn-form-choices"),
@@ -740,6 +843,7 @@ acme-api ●·
  · rate-limit-headers
 F2 starts a draft
 F6 / F7 move the selection
+F9 retires the spawn
 F10 quits — nothing is killed"
         );
     }
@@ -753,7 +857,7 @@ F10 quits — nothing is killed"
 
         let screen = with_drafts(
             30,
-            14,
+            15,
             drafts.all(),
             &five(),
             &saying(None),
@@ -776,6 +880,7 @@ acme-api ●·
  ● drop-legacy-auth
 F2 starts a draft
 F6 / F7 move the selection
+F9 retires the spawn
 F10 quits — nothing is killed"
         );
     }
@@ -871,6 +976,7 @@ F10 quits — nothing is killed"
             drafts.all(),
             &five(),
             &saying(None),
+            &Retirements::default(),
             &Cursor::default(),
         );
 
@@ -878,6 +984,118 @@ F10 quits — nothing is killed"
         // beneath it, and the mark sits after the selection's gutter.
         assert_eq!(painted[(MARK, 2)].symbol(), "!");
         assert_eq!(painted[(MARK, 2)].style().fg, Some(AMBER));
+    }
+
+    // A spawn being retired, which is the one thing about a row that is neither
+    // its status nor its name.
+
+    /// A retirement of this spawn, at whatever step it has reached.
+    fn being_retired(spawn: &str, step: &str) -> Retirements {
+        let mut retirements = Retirements::default();
+        retirements.asked_for(spawn);
+        retirements.doing(spawn, step.to_string());
+
+        retirements
+    }
+
+    #[test]
+    fn a_spawn_being_retired_says_so_on_its_row_and_says_what_is_happening_to_it() {
+        let retirements = being_retired("add-retry-logic", "stopping the session");
+
+        let screen = while_retiring(
+            30,
+            16,
+            &five(),
+            &retirements,
+            &Cursor::on_spawn("add-retry-logic"),
+        );
+
+        assert!(
+            screen.contains("▍- add-retry-logic"),
+            "a spawn being retired reads like one that is working:\n{screen}"
+        );
+        assert!(
+            screen.contains("   stopping the session"),
+            "the row does not say what is happening to it:\n{screen}"
+        );
+    }
+
+    /// A refusal is the one thing here somebody has to act on, so it reads the
+    /// way everything else the app cannot do reads: the amber mark, on the row,
+    /// from wherever in the list you are looking.
+    #[test]
+    fn a_retirement_that_was_refused_reads_as_something_needing_a_person() {
+        let mut retirements = being_retired("add-retry-logic", "removing the worktree");
+        retirements.refused(
+            "add-retry-logic",
+            "/w/add-retry-logic has work in it that is not committed".to_string(),
+        );
+
+        let screen = while_retiring(
+            30,
+            16,
+            &five(),
+            &retirements,
+            &Cursor::on_spawn("add-retry-logic"),
+        );
+        let painted = painted(
+            30,
+            16,
+            &[],
+            &five(),
+            &saying(None),
+            &retirements,
+            &Cursor::on_spawn("add-retry-logic"),
+        );
+
+        assert!(screen.contains("▍! add-retry-logic"), "{screen}");
+        assert!(
+            screen.contains("not committed"),
+            "the row does not say why it refused:\n{screen}"
+        );
+        let bar = screen
+            .lines()
+            .find(|line| line.starts_with("harness-launcher"))
+            .unwrap_or_else(|| panic!("the repository has no header:\n{screen}"));
+        assert!(
+            bar.contains('!'),
+            "the repository's bar does not carry the refusal: {bar}"
+        );
+        // The row a refusal is on: the heading, the blank under it, the group's
+        // header, and then the two spawns the attention-first order puts first.
+        assert_eq!(painted[(MARK, 5)].symbol(), "!");
+        assert_eq!(painted[(MARK, 5)].style().fg, Some(AMBER));
+    }
+
+    /// A retirement does not move a row. The selection is on the spawn being
+    /// retired, and a list that re-sorted under it would take the row out from
+    /// under the hand that asked for it.
+    #[test]
+    fn a_spawn_being_retired_stays_where_it_was_in_the_list() {
+        let entries = five();
+        let cursor = Cursor::on_spawn("add-retry-logic");
+        let retirements = being_retired("add-retry-logic", "stopping the session");
+
+        let untouched = while_retiring(30, 18, &entries, &Retirements::default(), &cursor);
+        let retired = while_retiring(30, 18, &entries, &retirements, &cursor);
+
+        assert_eq!(
+            rows_of(&untouched),
+            rows_of(&retired),
+            "the list re-sorted itself around a spawn being retired"
+        );
+    }
+
+    /// The spawns a screen has a row for, in the order it drew them — the rows
+    /// themselves, not the detail under the selected one nor the footer.
+    fn rows_of(screen: &str) -> Vec<String> {
+        let named: Vec<String> = five().iter().map(|entry| entry.spawn.clone()).collect();
+
+        screen
+            .lines()
+            .map(|line| line.chars().skip(INDENT).collect::<String>())
+            .filter(|name| named.contains(name))
+            .collect()
     }
 
     #[test]
@@ -935,7 +1153,7 @@ F10 quits — nothing is killed"
             )],
         };
 
-        let screen = drawn(24, 9, &entries, &snapshot, &Cursor::default());
+        let screen = drawn(24, 10, &entries, &snapshot, &Cursor::default());
 
         assert_eq!(
             screen,
@@ -948,6 +1166,7 @@ a-repository-with-a-v… ·
 
 F2 starts a draft
 F6 / F7 move the select…
+F9 retires the spawn
 F10 quits — nothing is …"
         );
     }
@@ -1004,7 +1223,7 @@ F10 quits — nothing is …"
     fn twenty_spawns_still_read_as_two_projects() {
         let (entries, snapshot) = twenty();
 
-        let screen = drawn(30, 28, &entries, &snapshot, &Cursor::default());
+        let screen = drawn(30, 29, &entries, &snapshot, &Cursor::default());
 
         assert_eq!(
             screen,
@@ -1036,6 +1255,7 @@ dotfiles ●·······
  · chore-08
 F2 starts a draft
 F6 / F7 move the selection
+F9 retires the spawn
 F10 quits — nothing is killed"
         );
     }
@@ -1046,7 +1266,15 @@ F10 quits — nothing is killed"
     #[test]
     fn a_status_is_a_shape_and_a_colour_at_once() {
         let (entries, snapshot) = (five(), saying(None));
-        let painted = painted(30, 12, &[], &entries, &snapshot, &Cursor::default());
+        let painted = painted(
+            30,
+            12,
+            &[],
+            &entries,
+            &snapshot,
+            &Retirements::default(),
+            &Cursor::default(),
+        );
         // The first group's rows, which are stopped, unknown and working.
         let stopped = &painted[(MARK, 3)];
         let unknown = &painted[(MARK, 4)];
@@ -1117,7 +1345,7 @@ F10 quits — nothing is killed"
     fn a_list_that_fits_is_not_scrolled_at_all() {
         let screen = drawn(
             30,
-            15,
+            16,
             &five(),
             &saying(None),
             &Cursor::on_spawn("rate-limit-headers"),
