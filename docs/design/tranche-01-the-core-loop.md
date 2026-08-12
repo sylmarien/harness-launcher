@@ -794,8 +794,21 @@ workflow.
 Not decided, and not oversights:
 
 - **Error presentation beyond the creation path.** Creation is settled — errors land on
-  the draft, which keeps your text. How an `unknown` spawn's reason reaches the slot, and
-  where the exit message and start-up orphan report appear, are not.
+  the draft, which keeps your text. Where the exit message and the start-up orphan report
+  appear is not.
+
+  > **The `unknown` half was closed 2026-08-12.** This entry also read *"how an `unknown`
+  > spawn's reason reaches the slot"* was undecided. It is decided: the reason is drawn
+  > **in the slot, over the top of the spawn's own screen rather than instead of it** — an
+  > unaccountable spawn is very often still running, since the status is about the app's
+  > instrumentation rather than the agent, and taking its screen away would hide a live
+  > session in order to complain about the app's own eyesight. The top is what it covers,
+  > because the bottom of a harness's screen is where it asks you things. It says more
+  > than the sentence the row carries: the pane, the process whose status would not
+  > resolve, that the pane is alive, and the last status the app managed to read — which
+  > are the facts that separate *the harness moved its records* from *this spawn died and
+  > the app has not noticed*. It is the app writing about itself, so it goes the moment
+  > the app can account for the spawn again.
 - **Configuration** — whether the app remembers anything between runs, and where. The
   worktree root is deliberately not configurable.
 - **Keybindings, and scrolling past a screenful** — specifically how the keyboard is

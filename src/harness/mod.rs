@@ -130,6 +130,36 @@ fn picked(offered: &[Choice], answers: &[String], default: Choice) -> String {
         .unwrap_or_else(|| default.id.to_string())
 }
 
+/// What has to be installed before a spawn can be started at all, and the one
+/// line that fixes it not being.
+///
+/// **Described here and checked by the app**, like everything else across this
+/// seam: the module knows *what* must be there and what to say about it missing,
+/// and does none of the finding out — no lookup, no process, no filesystem.
+/// `PATH` is named once, inside the sentence handed to the user, because that is
+/// where they will have to go and fix it; naming it is not consulting it, and
+/// nothing here ever reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Requirement {
+    /// The program that must be runnable — the same one [`launch_recipe`] names.
+    pub program: &'static str,
+    /// What the user can do about it not being there, in one line.
+    pub fix: &'static str,
+}
+
+/// The one thing that has to be installed for this harness to run.
+///
+/// The fix names no installation command on purpose: how Claude Code is
+/// installed differs by machine and changes between versions, and a refusal
+/// confidently telling somebody to run the wrong one is worse than a refusal
+/// that says exactly what is wrong and leaves the how to them.
+pub fn requirement() -> Requirement {
+    Requirement {
+        program: PROGRAM,
+        fix: "install Claude Code, or start this app from a shell that has it on PATH",
+    }
+}
+
 /// A process to start, described rather than started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRecipe {
@@ -431,6 +461,20 @@ mod tests {
                 "add retry logic to the client",
             ]
         );
+    }
+
+    /// The check and the launch must be about the same program, or the app
+    /// would refuse over one binary and then try to start another.
+    #[test]
+    fn what_has_to_be_installed_is_the_program_a_spawn_actually_runs() {
+        assert_eq!(requirement().program, launch_recipe(&spec()).program);
+    }
+
+    /// A refusal nobody can act on is barely better than a crash: this is the
+    /// one place that knows what installing this harness means.
+    #[test]
+    fn the_requirement_says_what_to_do_about_it_not_being_met() {
+        assert!(!requirement().fix.is_empty());
     }
 
     #[test]

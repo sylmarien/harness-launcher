@@ -1,9 +1,14 @@
-//! Running one external command and reading what it said.
+//! Running one external command and reading what it said — and asking, before
+//! anything is created, whether a command could be run at all.
 //!
 //! `git` and `tmux` are both driven this way: one process per call, arguments
 //! passed as a vector so nothing is ever quoted for a shell, and no shell in the
 //! path at all.
 
+use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -74,6 +79,37 @@ pub fn path_argument(path: &Path) -> Result<&str> {
     })
 }
 
+/// Whether this machine could actually run `program`, asked before anything is
+/// created rather than found out by trying.
+///
+/// **The `PATH` is passed in rather than read here.** It is what makes this a
+/// rule that can be tested at all: the answer would otherwise depend on whatever
+/// happened to be installed on the machine running the tests, which is exactly
+/// the kind of test that passes on a laptop and fails in CI.
+///
+/// A bare program name, looked for the way a shell would look for one: each
+/// directory of the `PATH` in turn, and the file has to be one something can
+/// execute. A file of the right name that nothing can run is not the program —
+/// finding it would move the failure to the moment the harness was started,
+/// which is after the worktree, the branch and the pane exist.
+pub fn runnable_on(path: Option<OsString>, program: &str) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+
+    env::split_paths(&path).any(|directory| executable(&directory.join(program)))
+}
+
+/// Whether this is a file something can execute.
+///
+/// Followed rather than inspected as a link: a program installed by a version
+/// manager is very often a symlink, and the thing that matters is what it points
+/// at.
+fn executable(candidate: &Path) -> bool {
+    fs::metadata(candidate)
+        .is_ok_and(|about| about.is_file() && about.permissions().mode() & 0o111 != 0)
+}
+
 /// A command that would not start at all.
 fn could_not_start(program: &str, error: &std::io::Error) -> Error {
     Error::new(format!(
@@ -90,4 +126,69 @@ fn as_written<A: AsRef<str>>(program: &str, args: &[A]) -> String {
     }
 
     written
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::{TempDir, tempdir};
+
+    /// A directory with one program in it, runnable or not.
+    pub(crate) fn holding(program: &str, runnable: bool) -> TempDir {
+        let directory = tempdir().unwrap();
+        let file = directory.path().join(program);
+        fs::write(&file, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(
+            &file,
+            fs::Permissions::from_mode(if runnable { 0o755 } else { 0o644 }),
+        )
+        .unwrap();
+
+        directory
+    }
+
+    /// A `PATH` made of these directories, as the environment would carry it.
+    pub(crate) fn path(directories: &[&TempDir]) -> OsString {
+        env::join_paths(directories.iter().map(|directory| directory.path())).unwrap()
+    }
+
+    #[test]
+    fn a_program_on_the_path_is_found_on_it() {
+        let bin = holding("some-harness", true);
+
+        assert!(runnable_on(Some(path(&[&bin])), "some-harness"));
+    }
+
+    #[test]
+    fn a_program_no_directory_on_the_path_holds_is_not_found() {
+        let bin = holding("something-else", true);
+
+        assert!(!runnable_on(Some(path(&[&bin])), "some-harness"));
+    }
+
+    /// Later directories are looked in too, which is how a program installed
+    /// somewhere other than the first entry is still found.
+    #[test]
+    fn every_directory_on_the_path_is_looked_in() {
+        let first = holding("something-else", true);
+        let second = holding("some-harness", true);
+
+        assert!(runnable_on(Some(path(&[&first, &second])), "some-harness"));
+    }
+
+    /// A file of that name which nothing can execute would fail at the moment
+    /// it mattered — after the worktree, the branch and the pane were made.
+    #[test]
+    fn a_file_of_the_right_name_that_cannot_be_run_is_not_the_program() {
+        let bin = holding("some-harness", false);
+
+        assert!(!runnable_on(Some(path(&[&bin])), "some-harness"));
+    }
+
+    #[test]
+    fn with_no_path_at_all_nothing_is_runnable() {
+        assert!(!runnable_on(None, "some-harness"));
+    }
 }

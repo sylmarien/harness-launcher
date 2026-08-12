@@ -27,6 +27,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::harness::Reading;
+#[cfg(test)]
+use crate::tmux::{ALIVE_PANE, ALIVE_PANE_PID};
 use crate::tmux::{Pane, Panes};
 
 /// How long a spawn that has just started is given before *unknown* applies.
@@ -53,6 +55,21 @@ pub enum Status {
     /// *The app* cannot tell. Not a kind of stopped: stopped means go and look
     /// at the spawn, unknown means something is wrong with the tooling.
     Unknown,
+}
+
+impl Status {
+    /// What it is called in a sentence.
+    ///
+    /// The list says a status with a mark and a colour; prose has neither, and
+    /// this is the one place the words are decided so that two of them cannot
+    /// come to disagree.
+    fn named(self) -> &'static str {
+        match self {
+            Status::Working => "working",
+            Status::Stopped => "stopped",
+            Status::Unknown => "unaccounted for",
+        }
+    }
 }
 
 /// A spawn the supervisor watches.
@@ -115,6 +132,64 @@ pub struct Evidence {
     pub foreground: Option<Foreground>,
 }
 
+/// Everything the app can say about a spawn it cannot account for.
+///
+/// **Kept for display and never promoted to a status of its own**: an old
+/// harness, a failed probe and a pane that vanished are one status and three
+/// sentences, not three statuses.
+///
+/// The sentence is what the list has room for. The three facts beside it are for
+/// the slot, where somebody who opened the spawn is diagnosing *the app* — and
+/// what separates "the harness moved its records" from "this spawn died and the
+/// app has not noticed" is exactly which process would not resolve, whether its
+/// pane is still alive, and what the app could last tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unaccounted {
+    /// Why the app cannot tell, in one sentence.
+    pub why: String,
+    /// The pane the spawn was started in.
+    pub pane: String,
+    /// The process tmux says is in that pane — and nothing at all when the pane
+    /// itself could not be found, because naming a process there would be the
+    /// app inventing a fact about the thing it has just admitted it cannot see.
+    pub pid: Option<u32>,
+    /// The last status the app actually managed to read, if it ever did.
+    pub last_known: Option<Status>,
+}
+
+impl Unaccounted {
+    /// What to say about it where there is room to say it all — a line at a
+    /// time, for whatever is drawing them.
+    ///
+    /// **The list gets [`Unaccounted::why`] and this gets everything**, and the
+    /// difference is what each is for: a row says *something is wrong with this
+    /// one*, and the slot is where somebody who came to find out what goes about
+    /// it. Naming the pane and the process is what makes the app diagnosable
+    /// from outside itself — they are what `tmux list-panes` and `ps` are asked
+    /// about next — and the last known status is what says whether this spawn was
+    /// ever accounted for at all.
+    ///
+    /// Sentences rather than a table: they are read once, by somebody who did not
+    /// come here to learn a layout.
+    pub fn explained(&self, name: &str) -> Vec<String> {
+        vec![
+            format!("the app cannot tell what {name} is doing."),
+            match self.pid {
+                Some(pid) => format!("its pane {} is alive, running process {pid}.", self.pane),
+                None => format!(
+                    "its pane {} is not one the tmux server still has.",
+                    self.pane
+                ),
+            },
+            format!("what went wrong: {}", self.why),
+            match self.last_known {
+                Some(status) => format!("the last status it could read was {}.", status.named()),
+                None => "it has not read one since this spawn started.".to_string(),
+            },
+        ]
+    }
+}
+
 /// One spawn, and what it is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -122,12 +197,61 @@ pub struct Row {
     pub name: String,
     /// What it is doing, as far as the app can tell.
     pub status: Status,
-    /// Why the app cannot tell, when it cannot.
+    /// What it has to say when it cannot tell, and nothing when it can.
+    pub unaccounted: Option<Unaccounted>,
+    /// The last status the app worked out **from evidence**, if it ever managed
+    /// one, carried across every tick that could not.
     ///
-    /// Kept for display and never promoted to a status of its own: an old
-    /// harness, a failed probe and a pane that vanished are one status and
-    /// three sentences, not three statuses.
-    pub reason: Option<String>,
+    /// **Not a copy of [`Row::status`]**, and the gap between them is the whole
+    /// reason this is a field rather than a read of the status beside it. A
+    /// spawn inside its grace period shows *working* on trust — nothing was
+    /// read, the app is taking a spawn it started a moment ago at its word — so
+    /// that row's status is not something the app can later quote back as
+    /// having been read. Left implicit, every spawn would arrive at *unknown*
+    /// claiming a last known status of *working*, because every spawn passes
+    /// through its grace period on the way in, and the sentence saying nothing
+    /// was ever read could never be printed.
+    pub last_known: Option<Status>,
+}
+
+impl Row {
+    /// Why the app cannot tell what this spawn is doing, when it cannot.
+    ///
+    /// The sentence alone, which is what a row of the list has room for.
+    pub fn reason(&self) -> Option<&str> {
+        self.unaccounted
+            .as_ref()
+            .map(|unaccounted| unaccounted.why.as_str())
+    }
+}
+
+/// What the ladder would have said about a spawn it cannot account for.
+///
+/// Shared with the modules that *draw* one — the list and the slot — so that no
+/// screen is ever asserted against a shape the ladder would not have produced.
+/// The pane and the process are the captured listing's own, for the same reason.
+/// The `last_known` the ladder would have put on a row of this status.
+///
+/// Shared with the modules that *draw* rows, for the same reason
+/// [`cannot_account`] is: a status the app read is its own last known status,
+/// and a status it could not read carries whatever came before — so a hand-built
+/// row is never a shape the ladder would not have produced.
+#[cfg(test)]
+pub(crate) fn last_read(status: Status) -> Option<Status> {
+    match status {
+        Status::Unknown => None,
+        read => Some(read),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn cannot_account(why: &str, last_known: Option<Status>) -> Unaccounted {
+    Unaccounted {
+        why: why.to_string(),
+        pane: ALIVE_PANE.to_string(),
+        pid: Some(ALIVE_PANE_PID),
+        last_known,
+    }
 }
 
 /// What every spawn was doing, at one moment.
@@ -151,25 +275,95 @@ impl Snapshot {
 ///
 /// Everything it needs has already been read: the panes tmux listed, and
 /// whatever the app managed to find out about each spawn, keyed by name.
+///
+/// **`before` is the last snapshot there was**, and it is here for exactly one
+/// thing: a spawn the app has stopped being able to read still knows what it
+/// could last tell about it. That is a fact about the app's own history rather
+/// than about the world, so it is carried forward from snapshot to snapshot
+/// instead of being asked for — and passing it in keeps this a pure function of
+/// what it was given.
 pub fn build(
     watched: &[Watched],
     panes: &Panes,
     evidence: &HashMap<String, Evidence>,
     at: Instant,
+    before: &Snapshot,
 ) -> Snapshot {
     Snapshot {
         rows: watched
             .iter()
-            .map(|spawn| {
-                let (status, reason) = climb(spawn, panes, evidence.get(&spawn.name), at);
-
-                Row {
-                    name: spawn.name.clone(),
-                    status,
-                    reason,
-                }
-            })
+            .map(|spawn| climb(spawn, panes, evidence.get(&spawn.name), at, before))
             .collect(),
+    }
+}
+
+/// Where a spawn lives, as far as the app can see — everything the sentences
+/// about not being able to tell are written from.
+struct Whereabouts<'a> {
+    /// The spawn the sentences are about.
+    spawn: &'a Watched,
+    /// The process tmux says holds its pane, when the pane was found at all.
+    pid: Option<u32>,
+    /// The last status the app could read about it.
+    last_known: Option<Status>,
+}
+
+impl Whereabouts<'_> {
+    /// Unknown, with the sentence that says why.
+    fn unknown(&self, why: String) -> Row {
+        Row {
+            name: self.spawn.name.clone(),
+            status: Status::Unknown,
+            unaccounted: Some(Unaccounted {
+                why,
+                pane: self.spawn.pane.clone(),
+                pid: self.pid,
+                last_known: self.last_known,
+            }),
+            last_known: self.last_known,
+        }
+    }
+
+    /// What an unresolved spawn is, which depends on how long it has been one.
+    ///
+    /// A spawn young enough to still be starting up is taken at its word: it was
+    /// handed work a moment ago, its pane is alive, and the harness has not
+    /// written anything yet. Past the grace period the same silence is the app
+    /// admitting it cannot tell.
+    ///
+    /// This is the one place the app knowingly risks the *working* it says costs
+    /// the product, and it is bounded on both sides: it lasts seconds, and a
+    /// spawn that was handed work seconds ago cannot yet be waiting on an
+    /// answer. The alternative was every new spawn reporting the tooling as
+    /// broken on the way up, which spends the meaning of `unknown` on something
+    /// that is not wrong.
+    ///
+    /// **The word it takes the spawn at is not a reading**, so it carries
+    /// `last_known` forward untouched rather than claiming this status as one.
+    /// Every spawn passes through here on the way in; were the guess recorded as
+    /// read, no spawn could ever say the app had read nothing about it.
+    fn settle(&self, at: Instant, why: String) -> Row {
+        if past_grace(self.spawn, at) {
+            return self.unknown(why);
+        }
+
+        Row {
+            name: self.spawn.name.clone(),
+            status: Status::Working,
+            unaccounted: None,
+            last_known: self.last_known,
+        }
+    }
+}
+
+/// A status the app worked out from evidence, and which is therefore also the
+/// last status it could read.
+fn read(spawn: &Watched, status: Status) -> Row {
+    Row {
+        name: spawn.name.clone(),
+        status,
+        unaccounted: None,
+        last_known: Some(status),
     }
 }
 
@@ -184,37 +378,48 @@ fn climb(
     panes: &Panes,
     evidence: Option<&Evidence>,
     at: Instant,
-) -> (Status, Option<String>) {
+    before: &Snapshot,
+) -> Row {
+    // Whatever the app had managed to read before this tick. A status it worked
+    // out is the answer; one it could not is whatever that snapshot was already
+    // carrying, so the fact survives however many ticks the app spends unable to
+    // tell.
+    let last_known = before.of(&spawn.name).and_then(|row| row.last_known);
     let Some(pane) = spawn.listed_in(panes) else {
-        return unknown("the app cannot find the pane it was running in".to_string());
+        return Whereabouts {
+            spawn,
+            pid: None,
+            last_known,
+        }
+        .unknown("the app cannot find the pane it was running in".to_string());
     };
     if pane.dead {
-        return (Status::Stopped, None);
+        return read(spawn, Status::Stopped);
     }
+    let whereabouts = Whereabouts {
+        spawn,
+        pid: Some(pane.pid),
+        last_known,
+    };
 
     let Some(evidence) = evidence else {
-        return settle(
-            spawn,
-            at,
-            "the app did not manage to read its status".to_string(),
-        );
+        return whereabouts.settle(at, "the app did not manage to read its status".to_string());
     };
 
     match &evidence.reading {
-        Reading::Working => (Status::Working, None),
-        Reading::Stopped => (Status::Stopped, None),
+        Reading::Working => read(spawn, Status::Working),
+        Reading::Stopped => read(spawn, Status::Stopped),
         Reading::Unresolved(why) => match &evidence.foreground {
             // The tie-breaker only ever settles it downwards. It cannot say a
             // spawn is working — a process holding a terminal is not an agent
             // with something to do — and a probe that failed must never read as
             // the agent being gone.
-            Some(Foreground::SomethingElse) => (Status::Stopped, None),
-            Some(Foreground::Unreadable(trouble)) => settle(
-                spawn,
+            Some(Foreground::SomethingElse) => read(spawn, Status::Stopped),
+            Some(Foreground::Unreadable(trouble)) => whereabouts.settle(
                 at,
                 format!("{why}, and the probe that would settle it failed: {trouble}"),
             ),
-            Some(Foreground::Harness) | None => settle(spawn, at, why.clone()),
+            Some(Foreground::Harness) | None => whereabouts.settle(at, why.clone()),
         },
     }
 }
@@ -229,31 +434,6 @@ pub fn past_grace(spawn: &Watched, at: Instant) -> bool {
     at.saturating_duration_since(spawn.adopted) >= GRACE
 }
 
-/// What an unresolved spawn is, which depends on how long it has been one.
-///
-/// A spawn young enough to still be starting up is taken at its word: it was
-/// handed work a moment ago, its pane is alive, and the harness has not written
-/// anything yet. Past the grace period the same silence is the app admitting it
-/// cannot tell.
-///
-/// This is the one place the app knowingly risks the *working* it says costs
-/// the product, and it is bounded on both sides: it lasts seconds, and a spawn
-/// that was handed work seconds ago cannot yet be waiting on an answer. The
-/// alternative was every new spawn reporting the tooling as broken on the way
-/// up, which spends the meaning of `unknown` on something that is not wrong.
-fn settle(spawn: &Watched, at: Instant, why: String) -> (Status, Option<String>) {
-    if past_grace(spawn, at) {
-        return unknown(why);
-    }
-
-    (Status::Working, None)
-}
-
-/// Unknown, with the sentence that says why.
-fn unknown(why: String) -> (Status, Option<String>) {
-    (Status::Unknown, Some(why))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +442,7 @@ mod tests {
     /// A real `list-panes` from a real tmux — see `captured/README.md`. In it,
     /// `%3` is a live pane and `%2` is one whose session stopped.
     const CAPTURED: &str = include_str!("../captured/tmux-list-panes.txt");
-    const ALIVE: &str = "%3";
+    const ALIVE: &str = ALIVE_PANE;
     const STOPPED: &str = "%2";
     const GONE: &str = "%99";
 
@@ -299,6 +479,7 @@ mod tests {
             &Panes::parse(CAPTURED),
             evidence,
             Instant::now(),
+            &Snapshot::default(),
         );
 
         snapshot
@@ -312,7 +493,7 @@ mod tests {
         let row = row(&watched(ALIVE), &found(Reading::Working, None));
 
         assert_eq!(row.status, Status::Working);
-        assert_eq!(row.reason, None);
+        assert_eq!(row.reason(), None);
     }
 
     #[test]
@@ -338,7 +519,7 @@ mod tests {
         let row = row(&watched(GONE), &found(Reading::Working, None));
 
         assert_eq!(row.status, Status::Unknown);
-        assert!(row.reason.unwrap().contains("pane"));
+        assert!(row.reason().unwrap().contains("pane"));
     }
 
     #[test]
@@ -347,8 +528,8 @@ mod tests {
 
         assert_eq!(row.status, Status::Unknown);
         assert_eq!(
-            row.reason,
-            Some("its session record carries no status".to_string()),
+            row.reason(),
+            Some("its session record carries no status"),
             "the reason the app cannot tell was dropped"
         );
     }
@@ -364,7 +545,7 @@ mod tests {
             Status::Working,
             "a spawn started a moment ago reported the tooling as broken"
         );
-        assert_eq!(row.reason, None);
+        assert_eq!(row.reason(), None);
     }
 
     #[test]
@@ -384,7 +565,7 @@ mod tests {
         );
 
         assert_eq!(row.status, Status::Stopped);
-        assert_eq!(row.reason, None);
+        assert_eq!(row.reason(), None);
     }
 
     #[test]
@@ -412,9 +593,237 @@ mod tests {
             Status::Unknown,
             "a failed probe was read as the agent being gone"
         );
-        let why = row.reason.unwrap();
+        let why = row.reason().unwrap().to_string();
         assert!(why.contains("carries no status"), "{why}");
         assert!(why.contains("not on PATH"), "{why}");
+    }
+
+    /// **What the app has to be able to say about its own ignorance**, and it
+    /// is more than a sentence: the process whose status would not resolve, that
+    /// the pane is alive all the same, and what it could last tell. Somebody
+    /// reading this is diagnosing the app rather than the agent, and those are
+    /// the three facts that separate "the harness moved its records" from "the
+    /// spawn died and the app has not noticed".
+    ///
+    /// The pid is the captured listing's own — a real `list-panes` from a real
+    /// tmux, so nothing here is a number this test made up.
+    #[test]
+    fn an_unaccountable_spawn_says_which_process_would_not_resolve_and_that_it_is_alive() {
+        let row = row(&watched(ALIVE), &found(unresolved(), None));
+
+        let unaccounted = row
+            .unaccounted
+            .expect("a spawn the app cannot account for says so");
+        assert_eq!(unaccounted.pane, ALIVE);
+        assert_eq!(
+            unaccounted.pid,
+            Some(ALIVE_PANE_PID),
+            "the process whose status would not resolve is not named"
+        );
+        assert!(
+            unaccounted.why.contains("carries no status"),
+            "{unaccounted:?}"
+        );
+    }
+
+    /// A pane the app cannot find has no process to name, and saying one anyway
+    /// would be the app inventing a fact about the very thing it just admitted
+    /// it cannot see.
+    #[test]
+    fn a_spawn_whose_pane_is_gone_names_no_process() {
+        let row = row(&watched(GONE), &found(Reading::Working, None));
+
+        let unaccounted = row
+            .unaccounted
+            .expect("a pane that is gone is unaccounted for");
+        assert_eq!(unaccounted.pid, None);
+        assert_eq!(unaccounted.pane, GONE);
+    }
+
+    /// **The last thing the app could tell, carried across the tick that lost
+    /// it.** It is the difference between a spawn that was working a moment ago
+    /// and one the app has never once managed to read — and only the first is a
+    /// reason to go on waiting.
+    #[test]
+    fn an_unaccountable_spawn_carries_the_last_status_the_app_could_read() {
+        let spawn = watched(ALIVE);
+        let panes = Panes::parse(CAPTURED);
+        let working = build(
+            from_ref(&spawn),
+            &panes,
+            &found(Reading::Working, None),
+            Instant::now(),
+            &Snapshot::default(),
+        );
+
+        let lost_it = build(
+            from_ref(&spawn),
+            &panes,
+            &found(unresolved(), None),
+            Instant::now(),
+            &working,
+        );
+
+        let unaccounted = lost_it.of(&spawn.name).unwrap().unaccounted.clone();
+        assert_eq!(
+            unaccounted
+                .expect("a spawn the app cannot account for")
+                .last_known,
+            Some(Status::Working),
+            "what the app could tell a tick ago was thrown away"
+        );
+    }
+
+    /// And it keeps being carried while the app goes on not being able to tell,
+    /// rather than surviving exactly one tick.
+    #[test]
+    fn the_last_status_survives_more_than_the_first_tick_that_lost_it() {
+        let spawn = watched(ALIVE);
+        let panes = Panes::parse(CAPTURED);
+        let mut latest = build(
+            from_ref(&spawn),
+            &panes,
+            &found(Reading::Stopped, None),
+            Instant::now(),
+            &Snapshot::default(),
+        );
+
+        for _ in 0..3 {
+            latest = build(
+                from_ref(&spawn),
+                &panes,
+                &found(unresolved(), None),
+                Instant::now(),
+                &latest,
+            );
+        }
+
+        assert_eq!(
+            latest
+                .of(&spawn.name)
+                .unwrap()
+                .unaccounted
+                .as_ref()
+                .unwrap()
+                .last_known,
+            Some(Status::Stopped)
+        );
+    }
+
+    /// A spawn nothing has ever resolved for says so, rather than claiming a
+    /// last known status it never had.
+    #[test]
+    fn a_spawn_the_app_has_never_read_has_no_last_known_status() {
+        let row = row(&watched(ALIVE), &found(unresolved(), None));
+
+        assert_eq!(row.unaccounted.unwrap().last_known, None);
+    }
+
+    /// **The grace period's *working* is a courtesy, not a reading.** A spawn
+    /// whose status has never once resolved spends its first seconds being taken
+    /// at its word — and if it then turns unaccountable it has to say the app
+    /// read nothing about it, rather than quoting its own guess back as a status
+    /// it managed to read. Told "the last status it could read was working", a
+    /// reader waits on a spawn the app never once saw.
+    ///
+    /// This is the tick sequence the running app actually produces, rather than
+    /// a first tick handed an empty snapshot: every real spawn is watched from
+    /// inside its grace period, so every real spawn has one of these guesses
+    /// behind it.
+    #[test]
+    fn the_word_a_starting_spawn_is_taken_at_is_not_a_status_the_app_read() {
+        let spawn = Watched::new("add-retry-logic-a7f3".to_string(), ALIVE.to_string());
+        let panes = Panes::parse(CAPTURED);
+
+        let starting = build(
+            from_ref(&spawn),
+            &panes,
+            &found(unresolved(), None),
+            spawn.adopted,
+            &Snapshot::default(),
+        );
+        assert_eq!(
+            starting.of(&spawn.name).unwrap().status,
+            Status::Working,
+            "a spawn inside its grace period is still taken at its word"
+        );
+
+        let gave_up = build(
+            from_ref(&spawn),
+            &panes,
+            &found(unresolved(), None),
+            spawn.adopted + GRACE,
+            &starting,
+        );
+
+        assert_eq!(
+            gave_up
+                .of(&spawn.name)
+                .unwrap()
+                .unaccounted
+                .as_ref()
+                .expect("a spawn the app cannot account for")
+                .last_known,
+            None,
+            "the grace period's guess was quoted back as a status the app had read"
+        );
+    }
+
+    /// **What somebody who opens an unaccountable spawn is given to work with.**
+    /// They are diagnosing the app, not the agent, so every fact that separates
+    /// one cause from another has to be in front of them: the spawn, the pane,
+    /// the process whose status would not resolve, that it is alive all the
+    /// same, what went wrong, and what the app could last tell.
+    #[test]
+    fn an_unaccountable_spawn_explains_itself_in_full() {
+        let unaccounted = cannot_account(
+            "its session record carries no status",
+            Some(Status::Working),
+        );
+
+        let said = unaccounted.explained("add-retry-logic-a7f3").join("\n");
+
+        for fact in [
+            "add-retry-logic-a7f3",
+            ALIVE,
+            &ALIVE_PANE_PID.to_string(),
+            "alive",
+            "carries no status",
+            "working",
+        ] {
+            assert!(said.contains(fact), "nothing says {fact}:\n{said}");
+        }
+    }
+
+    /// A pane the app cannot find is not a pane it can call alive, and the
+    /// explanation must not claim a process is running in it either.
+    #[test]
+    fn a_spawn_whose_pane_is_gone_does_not_claim_it_is_alive() {
+        let unaccounted = Unaccounted {
+            why: "the app cannot find the pane it was running in".to_string(),
+            pane: ALIVE.to_string(),
+            pid: None,
+            last_known: Some(Status::Working),
+        };
+
+        let said = unaccounted.explained("add-retry-logic-a7f3").join("\n");
+
+        assert!(!said.contains("alive"), "{said}");
+        assert!(said.contains(ALIVE), "{said}");
+    }
+
+    #[test]
+    fn a_spawn_nothing_was_ever_read_about_says_so_rather_than_naming_a_status() {
+        let said = cannot_account("its session record carries no status", None)
+            .explained("add-retry-logic-a7f3")
+            .join("\n");
+
+        for never_read in ["working", "stopped"] {
+            assert!(
+                !said.contains(never_read),
+                "a status the app never read was claimed as the last one:\n{said}"
+            );
+        }
     }
 
     #[test]
@@ -422,7 +831,7 @@ mod tests {
         let row = row(&watched(ALIVE), &HashMap::new());
 
         assert_eq!(row.status, Status::Unknown);
-        assert!(row.reason.is_some());
+        assert!(row.reason().is_some());
     }
 
     #[test]
@@ -437,11 +846,12 @@ mod tests {
                     &panes,
                     &found(reading, None),
                     Instant::now(),
+                    &Snapshot::default(),
                 );
 
                 let row = &snapshot.rows[0];
                 assert_eq!(
-                    row.reason.is_some(),
+                    row.reason().is_some(),
                     row.status == Status::Unknown,
                     "a reason became a status of its own: {row:?}"
                 );
@@ -462,6 +872,7 @@ mod tests {
             &Panes::parse(CAPTURED),
             &HashMap::new(),
             Instant::now(),
+            &Snapshot::default(),
         );
 
         let named: Vec<&str> = snapshot.rows.iter().map(|row| row.name.as_str()).collect();

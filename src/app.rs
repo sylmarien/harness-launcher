@@ -34,6 +34,8 @@
 //! frame around a small one — and the slot growing is what tells tmux to grow
 //! the panes behind it.
 
+use std::env;
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::sync::MutexGuard;
@@ -44,7 +46,8 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use ratatui::crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::widgets::{Block, Borders};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::control::{Client, Grid, POISONED};
 use crate::creation::{self, Report, Said, Started};
@@ -53,8 +56,9 @@ use crate::error::{Error, Result};
 use crate::keys::{self, Modes};
 use crate::list::{self, Cursor, Entry, Listing, Step};
 use crate::retirement::{self, Retirements};
+use crate::scaffolding::{AMBER, DIM, HEADING, wrapped};
 use crate::screen::{Screen, Size};
-use crate::snapshot::{Snapshot, Watched};
+use crate::snapshot::{Snapshot, Unaccounted, Watched};
 use crate::tmux::Server;
 
 /// How long a frame waits for a keystroke before drawing itself again.
@@ -399,14 +403,7 @@ pub fn run(held: &mut Held, world: &World) -> Result<()> {
                 }
                 Asked::Composed => held.cursor = Cursor::on_draft(held.drafts.start()),
                 Asked::Started => {
-                    // Only a draft can be started, and only what it says can
-                    // start it: a draft that has not said enough refuses on its
-                    // own row rather than here.
-                    if let Some(draft) = held.cursor.draft()
-                        && let Some(wanted) = held.drafts.submit(draft)
-                    {
-                        creation::making(draft, wanted, world.worktrees.clone(), reporting.clone());
-                    }
+                    held.start(world.worktrees.clone(), env::var_os("PATH"), &reporting);
                 }
                 Asked::Retired => held.retire(world.server, retiring.clone()),
                 Asked::Edited(edit) => {
@@ -451,11 +448,14 @@ fn reported(report: Report, held: &mut Held, world: &World, slot: Size) {
 
             match creation::start(world.server, world.session, world.client, slot, *plan) {
                 Ok(started) => held.adopt(started, report.draft, &world.arriving),
-                // *Accepted cost:* the worktree and the branch stay. Removing a
-                // worktree is retirement's job and retirement is not built —
-                // and the design's rule about litter is that it must not be
-                // invisible, which the draft's own record makes it: it names
-                // what was made, and stays until somebody deals with it.
+                // *Accepted cost:* the worktree and the branch stay, and are
+                // not taken back. Retiring is what removes a worktree and it
+                // acts on a **spawn** — there is none here, because the thing
+                // that would have been one is exactly what failed to start.
+                // The rule about litter is that it must not be *invisible*, and
+                // the draft's own record is what makes it visible: it names the
+                // worktree and the branch that were made, and it stays until
+                // somebody deals with them.
                 Err(refused) => held.drafts.failed(report.draft, refused.to_string()),
             }
         }
@@ -531,6 +531,38 @@ impl Held {
             cursor,
             entries,
         }
+    }
+
+    /// Make the draft the list is on into a spawn.
+    ///
+    /// **Only a draft, and only what it says can start it.** A draft that has
+    /// not said enough refuses on its own row rather than here, and one already
+    /// being made is not started twice.
+    ///
+    /// **The harness is checked before the thread is started**, which is the
+    /// last moment at which a refusal still costs nothing: everything past this
+    /// line makes something — a directory, a branch, a window — and a machine
+    /// with no harness on it was never going to run any of it. The refusal lands
+    /// where every other one does, on the draft, which keeps its text and its
+    /// choices and can be started again the moment the machine is fixed.
+    ///
+    /// The `PATH` comes in from the caller for the same reason it does
+    /// everywhere else on this road ([`creation::harness_installed`]).
+    fn start(&mut self, worktrees: PathBuf, path: Option<OsString>, reporting: &Sender<Report>) {
+        let Some(draft) = self.cursor.draft() else {
+            return;
+        };
+        let Some(wanted) = self.drafts.submit(draft) else {
+            return;
+        };
+
+        if let Err(refused) = creation::harness_installed(path) {
+            self.drafts.failed(draft, refused.to_string());
+
+            return;
+        }
+
+        creation::making(draft, wanted, worktrees, reporting.clone());
     }
 
     /// Ask for the spawn the list is on to be retired.
@@ -796,8 +828,15 @@ fn regions(area: Rect) -> (Rect, Rect, Rect) {
 }
 
 /// Paint one frame.
+///
+/// The snapshot is here for one thing beyond the list: a spawn the app cannot
+/// account for says so **in the slot**, which is where somebody who saw the mark
+/// on its row went to find out what is wrong.
 pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
     let (list, separator, slot) = regions(frame.area());
+    // Asked of the listing rather than passed alongside it: the list and the
+    // slot are two halves of one frame and must be drawn out of one moment.
+    let latest = listing.snapshot();
 
     frame.render_widget(listing, list);
     frame.render_widget(Block::new().borders(Borders::LEFT), separator);
@@ -809,6 +848,12 @@ pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
         InTheSlot::Session(spawn) => {
             let screen = spawn.screen();
             frame.render_widget(&*screen, slot);
+            if let Some(unaccounted) = latest
+                .of(&spawn.entry.spawn)
+                .and_then(|row| row.unaccounted.as_ref())
+            {
+                explain(frame, slot, unaccounted, &spawn.entry.spawn);
+            }
 
             screen.cursor()
         }
@@ -835,6 +880,45 @@ pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
     }
 }
 
+/// Say why the app cannot account for the spawn in the slot, over the top of
+/// what that spawn drew.
+///
+/// **Over the top rather than instead of.** An unaccountable spawn is very often
+/// still running — the whole point of the status is that it is the *app's*
+/// instrumentation that failed, not the agent — so taking its screen away would
+/// hide a live session to complain about the app's own eyesight. The top is what
+/// it covers, because the bottom of a harness's screen is where it asks you
+/// things.
+///
+/// It costs the rows it takes, and gives them back the moment the app can
+/// account for the spawn again.
+fn explain(frame: &mut Frame, slot: Rect, unaccounted: &Unaccounted, name: &str) {
+    let said = unaccounted.explained(name);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (at, sentence) in said.iter().enumerate() {
+        let how = if at == 0 { HEADING } else { DIM };
+        lines.extend(
+            wrapped(sentence, usize::from(slot.width))
+                .into_iter()
+                .map(|line| Line::styled(line, how.fg(AMBER))),
+        );
+    }
+
+    let Ok(rows) = u16::try_from(lines.len()) else {
+        return;
+    };
+    let band = Rect {
+        height: rows.min(slot.height),
+        ..slot
+    };
+
+    // Cleared first: what is underneath is a session's own screen, and prose
+    // written over the top of it without clearing would read as a sentence of
+    // the session's own.
+    frame.render_widget(Clear, band);
+    frame.render_widget(Paragraph::new(lines), band);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,6 +931,7 @@ mod tests {
 
     use crate::draft::tests::drafting;
     use crate::list::On;
+    use crate::snapshot;
 
     /// What the list says about one spawn.
     fn entry(repository: &str, spawn: &str) -> Entry {
@@ -870,7 +955,8 @@ mod tests {
             rows: vec![Row {
                 name: entries()[0].spawn.clone(),
                 status,
-                reason: reason.map(str::to_string),
+                unaccounted: reason.map(|why| snapshot::cannot_account(why, None)),
+                last_known: snapshot::last_read(status),
             }],
         }
     }
@@ -1133,12 +1219,17 @@ mod tests {
         assert_eq!(cursor_after(TERMINAL, &InTheSlot::Session(&spawn)), None);
     }
 
-    /// The row the spawn is on, whatever else moved around it.
+    /// The row the spawn is on in **the list**, whatever else moved around it.
+    ///
+    /// The list half of the line and not the whole of it: the slot beside it can
+    /// name the same spawn — an unaccountable one explains itself there — and a
+    /// row read across the separator would be asserting about both at once.
     fn row(screen: &str) -> String {
         screen
             .lines()
-            .find(|line| line.contains("add-retry-logic-a7f3"))
-            .unwrap_or_else(|| panic!("the spawn is not on screen:\n{screen}"))
+            .filter_map(|line| line.split('│').next())
+            .find(|list| list.contains("add-retry-logic-a7f3"))
+            .unwrap_or_else(|| panic!("the spawn is not in the list:\n{screen}"))
             .to_string()
     }
 
@@ -1182,6 +1273,66 @@ mod tests {
             .filter_map(|line| line.split('│').next())
             .filter(|list| !list.trim().is_empty())
             .count()
+    }
+
+    /// **An unaccountable spawn explains itself where somebody went to look at
+    /// it.** The row says *something is wrong with this one*; the slot is where
+    /// they came to find out what, and what they need is what the app knows and
+    /// they do not — the pane, the process whose status would not resolve, that
+    /// it is alive all the same, and what the app could last tell.
+    ///
+    /// This is the design's one open question about `unknown` being answered:
+    /// the reason reaches the slot, over the top of the session's own screen,
+    /// rather than replacing it.
+    #[test]
+    fn the_slot_explains_a_spawn_the_app_cannot_account_for() {
+        let screen = drawn(
+            180,
+            20,
+            &saying(
+                Status::Unknown,
+                Some("its session record carries no status"),
+            ),
+            "\x1b[12;1Hthe spawn is still drawing",
+        );
+
+        let pid = crate::tmux::ALIVE_PANE_PID.to_string();
+        for fact in [
+            "cannot tell",
+            crate::tmux::ALIVE_PANE,
+            pid.as_str(),
+            "alive",
+            "carries no status",
+        ] {
+            assert!(
+                screen.contains(fact),
+                "nothing in the slot says {fact}:\n{screen}"
+            );
+        }
+        assert!(
+            screen.contains("the spawn is still drawing"),
+            "the explanation took the whole slot rather than the top of it:\n{screen}"
+        );
+        assert!(
+            screen.contains("SPAWNS"),
+            "explaining a spawn hid the list:\n{screen}"
+        );
+    }
+
+    /// And a spawn the app *can* account for gets the whole slot: the band is
+    /// the app admitting something, so a spawn it has nothing to admit about
+    /// must not carry one.
+    #[test]
+    fn a_spawn_the_app_can_account_for_keeps_the_whole_slot() {
+        let screen = drawn(
+            180,
+            20,
+            &saying(Status::Working, None),
+            "the spawn is talking",
+        );
+
+        assert!(!screen.contains("cannot tell"), "{screen}");
+        assert!(screen.contains("the spawn is talking"), "{screen}");
     }
 
     #[test]
@@ -1682,6 +1833,85 @@ mod tests {
         assert!(first.contains("  the first draft"), "{first}");
         assert!(!first.contains("  the second draft"), "{first}");
         assert!(second.contains("  the second draft"), "{second}");
+    }
+
+    /// The whole screen, on a terminal tall enough for everything a form has to
+    /// say — including the record of a creation that stopped, which is the last
+    /// thing on it and the first thing a short slot scrolls away from.
+    fn on_a_screen_with_room_for_everything(held: &Held) -> String {
+        painted(
+            Size {
+                columns: 90,
+                rows: 30,
+            },
+            held.drafts.all(),
+            &held.entries,
+            &Snapshot::default(),
+            &held.retirements,
+            &held.cursor,
+            &in_the_slot(&held.spawns, &held.drafts, &held.cursor),
+        )
+    }
+
+    /// A draft with both fields filled in, which is one that can be started.
+    fn ready(repository: &str, work: &str) -> Drafts {
+        let mut drafts = drafting(&[]);
+        let id = drafts.start();
+        for character in repository.chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+        drafts.edit(id, Edit::Next);
+        for character in work.chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+
+        drafts
+    }
+
+    /// **The refusal that costs nothing, in the one place it is reached from.**
+    /// A machine without the harness is found out before a worktree, a branch or
+    /// a pane exists — and the draft is still there afterwards with the
+    /// paragraph and every choice it had, so fixing the machine and pressing the
+    /// key again is the whole of what it costs.
+    #[test]
+    fn a_draft_started_without_the_harness_installed_keeps_everything_it_said() {
+        let somewhere = tempfile::tempdir().unwrap();
+        let worktrees = somewhere.path().join("worktrees");
+        let nothing_installed = tempfile::tempdir().unwrap();
+        let mut held = Held::new(
+            Spawns::new(Vec::new()),
+            ready("/code/project", "add retry logic"),
+        );
+        held.cursor = Cursor::on_draft(held.drafts.all()[0].id());
+        let (reporting, _reports) = mpsc::channel();
+
+        held.start(
+            worktrees.clone(),
+            Some(nothing_installed.path().as_os_str().to_owned()),
+            &reporting,
+        );
+
+        assert!(
+            !worktrees.exists(),
+            "something was made on disk for a spawn that was never going to start"
+        );
+        let screen = on_a_screen_with_room_for_everything(&held);
+        assert!(
+            screen.contains("NOT STARTED"),
+            "the draft does not say it did not start:\n{screen}"
+        );
+        assert!(
+            screen.contains(crate::harness::requirement().program),
+            "the draft does not say what is missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("add retry logic"),
+            "the refusal cost the paragraph:\n{screen}"
+        );
+        assert!(
+            screen.contains("Blue") && screen.contains("Small"),
+            "the refusal cost the choices that were picked:\n{screen}"
+        );
     }
 
     // A draft becoming a spawn, which is the one thing that changes what the

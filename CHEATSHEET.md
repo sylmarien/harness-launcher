@@ -43,3 +43,8 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
   again.
 - Worktrees live under `$XDG_DATA_HOME/harness-launcher/worktrees`
   (`~/.local/share/...` when that is unset).
+- **A `?` spawn explains itself when you select it** — its pane, the process
+  whose status would not resolve, and what the app could last tell — over the top
+  of its screen, which is still live underneath.
+- **A refusal never costs your typing.** A draft that could not be started keeps
+  its text and its choices, says why, and `F5` tries it again.

@@ -141,6 +141,17 @@ fn run() -> Result<()> {
 /// around it is built the same: the session, the client and the supervisor are
 /// what the first spawn will need whenever it is written.
 fn spawn(wanted: &[Wanted]) -> Result<()> {
+    // **Before anything else, and only when there is something to start.** A
+    // machine without the harness on it has nothing to run, and finding that out
+    // later would leave a worktree and a branch behind for a session that was
+    // never going to exist. An app asked to start *nothing* is not a machine to
+    // refuse over: it has created nothing, somebody may be about to install the
+    // harness, and the same check runs again on the draft they write — where a
+    // refusal costs them a sentence rather than the app.
+    if !wanted.is_empty() {
+        creation::harness_installed(std::env::var_os("PATH"))?;
+    }
+
     let slot = app::slot_now()?;
     let worktrees = worktrees::root()?;
     let tmux = tmux::Server::app();
