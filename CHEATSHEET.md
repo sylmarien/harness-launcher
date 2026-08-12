@@ -18,6 +18,7 @@ running and a draft in the slot; `F5` starts what you write in it.
 | Key         | Does                                     |
 | ----------- | ---------------------------------------- |
 | `F2`        | start a draft                            |
+| `F3`        | throw the draft away — it asks first     |
 | `F5`        | make the draft in the slot into a spawn  |
 | `F6` / `F7` | move the selection up / down             |
 | `F9`        | retire the selected spawn                |
