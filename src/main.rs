@@ -25,6 +25,11 @@
 //! spawns' statuses. **Nothing hides it** — that is the point of the whole
 //! layout.
 //!
+//! **Run it with nothing at all and it opens on a blank form** — no session, a
+//! draft in the slot, and the list beside it. Everything the command line can
+//! say can be said there instead, so the shortest way in is to open the app and
+//! write what you want done.
+//!
 //! **Another session is composed in the same place.** `F2` starts a draft: a
 //! row of its own pinned above the repositories, and a form in the slot asking
 //! for a repository, the work, and whatever the harness lets you choose. It is
@@ -36,6 +41,14 @@
 //! draft's row makes way for a spawn row under its repository, and the new
 //! session is in the slot. On failure it is a draft again, with the text exactly
 //! as it was and a record of what had already been made.
+//!
+//! **And `F9` retires the spawn the list is on** — the one act that releases
+//! what the app made, and never inferred from an agent falling silent. The
+//! session is stopped, and only once it is confirmed gone is the worktree
+//! checked and removed: a cleanliness check taken against a live agent is a
+//! race, and losing it deletes the file the agent wrote on its way out. Anything
+//! uncommitted and it refuses, saying so on the row. The branch is left alone
+//! either way.
 
 mod app;
 mod cli;
@@ -49,6 +62,7 @@ mod keys;
 mod list;
 mod names;
 mod process;
+mod retirement;
 mod scaffolding;
 mod screen;
 mod snapshot;
@@ -79,6 +93,10 @@ fn run() -> Result<()> {
             Ok(())
         }
         Invocation::Spawn(wanted) => spawn(&wanted),
+        // Nothing to make, and everything else the same: the session, the
+        // client and the supervisor are what a spawn started from the form a
+        // moment later will need, and they cost nothing standing empty.
+        Invocation::Compose => spawn(&[]),
     }
 }
 
@@ -105,6 +123,11 @@ fn run() -> Result<()> {
 /// After this the app makes spawns the other way, from a draft — the same plan,
 /// the same worktree, the same window, on a thread so the screen keeps drawing.
 /// What is different here is only that a refusal has a shell to land on.
+///
+/// **Nothing to start is an ordinary way to run this**, and the only difference
+/// it makes is a draft waiting in the slot instead of a session. Everything
+/// around it is built the same: the session, the client and the supervisor are
+/// what the first spawn will need whenever it is written.
 fn spawn(wanted: &[Wanted]) -> Result<()> {
     let slot = app::slot_now()?;
     let worktrees = worktrees::root()?;
@@ -135,12 +158,17 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
         client: &client,
         snapshots: watching.snapshots,
         arriving: watching.arriving,
+        leaving: watching.leaving,
         worktrees,
     };
-    let mut held = app::Held::new(
-        app::Spawns::new(spawns)?,
-        draft::Drafts::new(harness::choices()),
-    );
+    // A draft is started for somebody who asked for nothing, and only for them:
+    // it is the whole of what they asked for, and starting one beside sessions
+    // that were asked for would be a row nobody wanted.
+    let mut drafts = draft::Drafts::new(harness::choices());
+    if spawns.is_empty() {
+        drafts.start();
+    }
+    let mut held = app::Held::new(app::Spawns::new(spawns), drafts);
 
     app::run(&mut held, &world)
 }

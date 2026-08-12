@@ -31,6 +31,8 @@ const SEPARATOR: &str = "--and";
 pub enum Invocation {
     /// Start a session on a worktree of its own, for each of these.
     Spawn(Vec<Wanted>),
+    /// Open with nothing running and a draft in the slot, to be written there.
+    Compose,
     /// Say how to use the app.
     Help,
 }
@@ -41,8 +43,18 @@ pub enum Invocation {
 /// on its own — so the choices written in a group belong to the spawn that
 /// group describes, and a group that makes no sense names itself rather than
 /// spoiling the ones beside it.
+///
+/// **A line with nothing on it is the app being opened rather than a mistake.**
+/// Everything the command line can say can be said in the form instead, and
+/// somebody who has not decided what to work on yet has nothing to type here —
+/// so the app opens on the one thing they would have pressed `F2` for. It is a
+/// blank line rather than a flag because a flag would be a name to know for the
+/// simplest thing the app does.
 pub fn parse(arguments: Vec<String>) -> Result<Invocation> {
     let given: Vec<String> = arguments.into_iter().skip(1).collect();
+    if given.is_empty() {
+        return Ok(Invocation::Compose);
+    }
 
     let mut requests = Vec::new();
     for group in given.split(|argument| argument == SEPARATOR) {
@@ -126,8 +138,12 @@ pub fn usage() -> String {
         "harness-launcher — start coding sessions on worktrees of their own\n\
          \n\
          usage:\n    \
+             harness-launcher\n    \
              harness-launcher <repository> <work> [options]\n                     \
                               [{SEPARATOR} <repository> <work> [options]]...\n\
+         \n    \
+             with nothing at all, it opens on a blank form and starts what you\n    \
+             write there; the arguments below are the same thing said up front\n\
          \n    \
              <repository>  a local git repository, or any directory inside one\n    \
              <work>        what the session should do, in your own words\n    \
@@ -139,7 +155,8 @@ pub fn usage() -> String {
              -h, --help    show this\n\
          \n\
          everything you type goes to whatever is in the slot; F6 and F7 move\n\
-         between them, F2 starts a draft of another session, and F10 quits and\n\
+         between them, F2 starts a draft of another session, F5 starts what a\n\
+         draft describes, F9 retires the session you are on, and F10 quits and\n\
          leaves every one of them running.\n",
         offer(&harness::models(), harness::default_model()),
         offer(&harness::effort_levels(), harness::default_effort_level()),
@@ -207,7 +224,7 @@ mod tests {
     fn spawns(arguments: &[&str]) -> Vec<Wanted> {
         match parse_arguments(arguments).unwrap() {
             Invocation::Spawn(wanted) => wanted,
-            Invocation::Help => panic!("expected a spawn, got a request for the usage text"),
+            otherwise => panic!("expected a spawn, got {otherwise:?}"),
         }
     }
 
@@ -347,10 +364,20 @@ mod tests {
         );
     }
 
+    /// The simplest way to run it, and the one with nothing to learn first:
+    /// open the app and write what you want in the form it opens on.
     #[test]
-    fn too_little_to_go_on_is_refused() {
-        assert!(parse_arguments(&[]).is_err());
+    fn nothing_at_all_opens_the_app_on_a_blank_form() {
+        assert_eq!(parse_arguments(&[]).unwrap(), Invocation::Compose);
+    }
+
+    /// **Half a line is still a mistake.** Somebody who named a repository and
+    /// stopped meant to say more, and opening a form having thrown that away
+    /// would be the app deciding it knew better.
+    #[test]
+    fn too_little_to_go_on_is_refused_rather_than_taken_as_nothing() {
         assert!(parse_arguments(&["/code/project"]).is_err());
+        assert!(parse_arguments(&["--model", "haiku"]).is_err());
     }
 
     #[test]
@@ -398,5 +425,10 @@ mod tests {
     #[test]
     fn the_usage_text_says_how_to_ask_for_more_than_one() {
         assert!(usage().contains(SEPARATOR), "{}", usage());
+    }
+
+    #[test]
+    fn the_usage_text_says_that_the_arguments_can_be_left_off_entirely() {
+        assert!(usage().contains("with nothing at all"), "{}", usage());
     }
 }

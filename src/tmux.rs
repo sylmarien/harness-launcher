@@ -200,6 +200,19 @@ impl Server {
         Ok(())
     }
 
+    /// Take a pane away, and the window it is the only pane of.
+    ///
+    /// Two jobs, both of them retirement's. It is the **backstop** for a
+    /// session that will not stop when it is asked, and it is the tidying-up
+    /// after one that did: `remain-on-exit` is what makes a stopped spawn
+    /// readable rather than absent, and the price of it is that a pane nobody
+    /// takes away is a row of every `list-panes` from then on.
+    pub fn close(&self, pane: &str) -> Result<()> {
+        self.run(&["kill-pane", "-t", pane])?;
+
+        Ok(())
+    }
+
     /// Every pane on the server, in one call.
     ///
     /// This is the whole of a tick's subprocess cost: twenty spawns are twenty
@@ -611,6 +624,28 @@ pub(crate) mod tests {
             tmux.server.run(&["has-session", "-t", &session]).is_ok(),
             "the session went with the spawn that stopped"
         );
+    }
+
+    /// Both the states a pane can be closed from: still running something, and
+    /// kept behind by `remain-on-exit` after what ran in it stopped.
+    #[test]
+    fn closing_a_pane_takes_it_off_the_server_whether_or_not_it_was_still_running() {
+        let tmux = PrivateTmux::start("closing-takes-the-pane-away");
+        let session = tmux.server.session(SLOT).unwrap();
+        let running = tmux.server.open_window(&session, "running").unwrap();
+        tmux.server
+            .start(&running, &tmux.recipe("sleep 120"))
+            .unwrap();
+        let stopped = tmux.server.open_window(&session, "stopped").unwrap();
+        tmux.server.start(&stopped, &tmux.recipe("exit 3")).unwrap();
+        tmux.until("#{pane_dead}", |seen| seen.contains('1'));
+
+        tmux.server.close(&running).unwrap();
+        tmux.server.close(&stopped).unwrap();
+
+        let panes = tmux.server.panes().unwrap();
+        assert_eq!(panes.get(&running), None, "the live pane is still listed");
+        assert_eq!(panes.get(&stopped), None, "the dead pane is still listed");
     }
 
     #[test]

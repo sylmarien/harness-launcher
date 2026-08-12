@@ -5,17 +5,25 @@ choose — from one place, see at a glance which ones need you, and open one to
 answer. No worktree created by hand, no terminals to juggle.
 
 What is here today is **as many spawns as you ask for**, end to end, with a list
-beside them that says what each one is doing — and **more of them started from
+beside them that says what each one is doing — **more of them started from
 inside the app**, without leaving it or losing sight of the ones already
-running.
+running, and **retired from there too** when you are done with one.
 
 **It is an ordinary terminal program.** Run it from a shell, or from inside tmux
 if that happens to be where you are; it makes no difference to anything.
 
 ```
+cargo run
+
 cargo run -- <repository> "<the work>" [--model <id>] [--level <id>] \
             [--and <repository> "<the work>" [--model <id>] [--level <id>]]...
 ```
+
+**With no arguments at all it opens on a blank form**, with nothing running and
+a draft in the slot: run it, write what you want done and where, and press `F5`.
+Everything the command line below can say can be said there instead, so there is
+nothing to learn before the first session — and half a line is still a mistake,
+because somebody who named a repository and stopped meant to say more.
 
 `--and` is what separates one spawn from the next, and each of them chooses its
 own model and effort level. It is a separator rather than one pair of arguments
@@ -29,10 +37,11 @@ app-owned root, and starts the session in it. Then it draws the whole screen —
 the list on the left, one session in the slot on the right, and the line between
 them. Everything you type goes to the session in the slot, as if you had started
 it yourself. **F6 and F7 move the selection up and down the list, F2 starts a
-draft, F5 makes that draft into a spawn, and F10 quits** — and those five are the
-whole of the app's keyboard so far. How the keyboard is split between the app and
-the spawn is still an open question in the design; these five are what the list
-and the form need, and nothing more is claimed.
+draft, F5 makes that draft into a spawn, F9 retires the selected spawn, and F10
+quits** — and those six are the whole of the app's keyboard so far. How the
+keyboard is split between the app and the spawn is still an open question in the
+design; these six are what the list and the form need, and nothing more is
+claimed.
 
 **Another spawn is composed in the same screen, and it is not a dialog.** `F2`
 starts a draft: a row of its own pinned above the repositories, and a form in the
@@ -74,6 +83,25 @@ icon and a colour together, so the list needs no legend and survives a
 colour-blind reader. The selected spawn says what the app made for it — its
 branch, its worktree, and the reason if the app cannot tell what it is doing.
 
+**`F9` retires the spawn the list is on**, which is the only thing that releases
+what the app made — never inferred from an agent falling silent. The order is
+strict and it is the point: the session is asked to stop with `SIGTERM`, the app
+waits a bounded time and kills the pane if it has to, and **only once the process
+is confirmed gone** is the worktree checked and removed. A check taken against a
+live agent is a race, and losing it deletes the file the agent wrote on its way
+out.
+
+Dirty is exactly `git status --porcelain --untracked-files=all
+--ignore-submodules=none`, **with the flags spelled out** — git's own
+`worktree remove` runs that check without them, so a user with
+`status.showUntrackedFiles = no` would have an hour of never-staged work deleted
+without a word. **Anything uncommitted and retiring refuses**, with no
+confirmation flow: clean it up yourself and press `F9` again. The refusal lands
+after the session has been stopped, which is the cost of checking a worktree
+nothing is writing to, and the row says so — `-` while it is being retired, `!`
+if it would not, with the reason under it. **Retiring removes the worktree and
+leaves the branch**, which is where the committed work is.
+
 tmux is here, but you never see it: a **detached** session on a socket of the
 app's own, one invisible window per spawn, drawing nothing. It owns the
 processes; the app reads what they draw over a **control-mode client** and
@@ -89,6 +117,9 @@ immutable snapshot of what every spawn is doing: **working**, **stopped**, or
 anything about the agent, with the reason shown beside the row.
 
 `cargo run -- --help` lists the models and effort levels the harness offers.
+
+[`CHEATSHEET.md`](CHEATSHEET.md) is the one-page version of all of the above:
+how to run it, and what every key and mark does.
 
 ## Reading the design
 

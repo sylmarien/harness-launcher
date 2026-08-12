@@ -8,8 +8,8 @@
 //! What is in the slot is a spawn's own screen: a grid the control-mode client
 //! keeps current whether or not it is the one being shown, copied here cell by
 //! cell. Keystrokes go the other way. **The app types into a spawn only what the
-//! user typed** — it has no keyboard of its own beyond the five keys that leave,
-//! move the selection, start a draft and make one into a spawn.
+//! user typed** — it has no keyboard of its own beyond the six keys that leave,
+//! move the selection, start a draft, make one into a spawn, and retire one.
 //!
 //! **Or the slot holds a draft**, which is a form the app draws and types into
 //! itself. That is the one place an ordinary key means something to the app
@@ -52,6 +52,7 @@ use crate::draft::{self, Draft, Drafts, Edit};
 use crate::error::{Error, Result};
 use crate::keys::{self, Modes};
 use crate::list::{self, Cursor, Entry, Listing, Step};
+use crate::retirement::{self, Retirements};
 use crate::screen::{Screen, Size};
 use crate::snapshot::{Snapshot, Watched};
 use crate::tmux::Server;
@@ -73,7 +74,7 @@ const LIST_SHARE: u16 = 33;
 ///
 /// A function key because every ordinary one belongs to the spawn: a digit is
 /// exactly what you need to send when a harness asks you to pick an option, and
-/// `q` is a letter somebody is in the middle of typing. This and the two below
+/// `q` is a letter somebody is in the middle of typing. This and the keys below
 /// are the whole of the app's keyboard so far, and how the rest of it is divided
 /// is not settled yet — so the keys that move the selection sit well away from
 /// the one that leaves, and nothing else is claimed.
@@ -90,9 +91,23 @@ const DOWN: event::KeyCode = event::KeyCode::F(7);
 /// selection is a row appearing in the list nobody asked for.
 const COMPOSE: event::KeyCode = event::KeyCode::F(2);
 
+/// Retire the spawn the list is on.
+///
+/// The sixth key, and the second that cannot be taken back with another
+/// keystroke — so it sits in the block with `F10` rather than beside the two
+/// that move: the hand that walks the list is on `F6` and `F7` all day, and the
+/// key that stops a session must not be one row of a mistyped selection away
+/// from them. The mistyping it *is* exposed to is `F10` — leaving — which
+/// costs nothing in the other direction, because leaving kills nothing.
+///
+/// *Accepted cost:* reaching for `F10` and landing here stops the selected
+/// spawn. What it cannot do is destroy work: a worktree with anything
+/// uncommitted in it refuses, and the branch is left alone either way.
+const RETIRE: event::KeyCode = event::KeyCode::F(9);
+
 /// Make the draft in the slot into a spawn.
 ///
-/// The fifth key, and the only one in the app that creates anything — a branch,
+/// The one key in the app that creates anything — a branch,
 /// a worktree and a session, none of which can be taken back with another
 /// keystroke. So it sits away from `F2`, which is otherwise the key a hand is
 /// coming from, and away from the two that move: the two mistypings that would
@@ -158,18 +173,14 @@ pub struct Spawns {
 }
 
 impl Spawns {
-    /// The spawns the app is to show. There has to be at least one.
+    /// The spawns the app is to show, of which there may be none.
     ///
-    /// Not a state the app can reach today — the command line refuses to ask
-    /// for nothing — but the slot is not designed to be empty, and an app
-    /// drawing a screen with no session on it is not something to work out on
-    /// the way past.
-    pub fn new(all: Vec<Spawn>) -> Result<Self> {
-        if all.is_empty() {
-            return Err(Error::new("there is no spawn to show"));
-        }
-
-        Ok(Self { all })
+    /// **None is an ordinary state now, at both ends of a run**: the app opened
+    /// with nothing to start and a draft to write, or every spawn it had has
+    /// been retired. What the screen is then is the list, with an empty slot
+    /// beside it.
+    pub fn new(all: Vec<Spawn>) -> Self {
+        Self { all }
     }
 
     /// What the list says about all of them.
@@ -192,27 +203,47 @@ impl Spawns {
         self.all.push(spawn);
     }
 
-    /// The spawn in the slot.
+    /// The spawn of this name, if the app still has it.
+    fn of(&self, name: &str) -> Option<&Spawn> {
+        self.all.iter().find(|spawn| spawn.entry.spawn == name)
+    }
+
+    /// Let go of a spawn that has been retired, and hand it over.
+    ///
+    /// Handed back rather than dropped here, because there is one more thing to
+    /// do with it: the pane it was running in is the pane whose grid the app is
+    /// still holding.
+    fn let_go_of(&mut self, name: &str) -> Option<Spawn> {
+        let at = self
+            .all
+            .iter()
+            .position(|spawn| spawn.entry.spawn == name)?;
+
+        Some(self.all.remove(at))
+    }
+
+    /// The spawn in the slot, when there is one.
     ///
     /// A cursor on nothing — or on a spawn that is not here — shows the first
     /// that was started, because the slot is never empty while there is
-    /// something to put in it. Nothing the app does reaches that fallback: the
-    /// selection starts on a spawn and every move lands on another, so this is
-    /// what the type needs rather than a case with behaviour to defend.
-    fn showing(&self, cursor: &Cursor) -> &Spawn {
+    /// something to put in it. **Nothing at all is a state the app can now
+    /// reach**, by retiring the last spawn there is: what it shows then is the
+    /// list, with an empty slot beside it.
+    fn showing(&self, cursor: &Cursor) -> Option<&Spawn> {
         cursor
             .spawn()
-            .and_then(|on| self.all.iter().find(|spawn| spawn.entry.spawn == on))
-            .unwrap_or(&self.all[0])
+            .and_then(|on| self.of(on))
+            .or_else(|| self.all.first())
     }
 
     /// The shape their screens are in.
     ///
     /// One answer for all of them: they are created at the slot's size and
     /// resized together, so a spawn whose grid was a different shape from its
-    /// neighbours' would be a bug rather than a case to handle.
-    fn shape(&self) -> Size {
-        self.all[0].size()
+    /// neighbours' would be a bug rather than a case to handle. Asked once,
+    /// before the first frame, where there is always a spawn to ask.
+    fn shape(&self) -> Option<Size> {
+        self.all.first().map(Spawn::size)
     }
 
     /// Catch every spawn up with the shape the slot has become.
@@ -275,6 +306,8 @@ pub struct World<'a> {
     pub snapshots: Receiver<Snapshot>,
     /// How the supervisor is told to watch a spawn that has just been made.
     pub arriving: Sender<Watched>,
+    /// How it is told to let go of one that has been retired.
+    pub leaving: Sender<String>,
     /// Where the worktrees the app creates go. Resolved once, before the screen
     /// was taken over, so a machine with nowhere to put them said so on a shell.
     pub worktrees: PathBuf,
@@ -284,13 +317,20 @@ pub struct World<'a> {
 ///
 /// Snapshots are drained rather than queued: what the user wants to see is what
 /// is true now, so a frame that arrives behind several ticks skips them. What a
-/// creation has to say is drained rather than sampled, for the opposite reason:
-/// every line of it is a record of something that was about to happen, and a
-/// skipped one is a worktree nobody wrote down.
+/// creation or a retirement has to say is drained rather than sampled, for the
+/// opposite reason: every line of it is a record of something that was about to
+/// happen, and a skipped one is a worktree nobody wrote down.
+///
+/// **An empty slot is an ordinary state at both ends of a run** — nothing was
+/// asked for and a draft is waiting, or everything there was has been retired.
+/// The shape every grid is in is read off the first spawn there is; with none to
+/// read it from it is asked of the terminal, which is the same answer the first
+/// spawn will be given when somebody writes one.
 pub fn run(held: &mut Held, world: &World) -> Result<()> {
     let mut latest = Snapshot::default();
-    let mut shape = held.spawns.shape();
+    let mut shape = held.spawns.shape().map_or_else(slot_now, Ok)?;
     let (reporting, reports) = mpsc::channel();
+    let (retiring, retirements) = mpsc::channel();
 
     ratatui::run(|terminal| -> io::Result<()> {
         loop {
@@ -298,11 +338,15 @@ pub fn run(held: &mut Held, world: &World) -> Result<()> {
                 latest = snapshot;
             }
 
-            // Before anything is drawn or borrowed, because this is the one
-            // thing in a frame that can add a spawn — and the list, the slot
-            // and the keyboard all have to be looking at the same set of them.
+            // Before anything is drawn or borrowed, because these are the two
+            // things in a frame that can add or take away a spawn — and the
+            // list, the slot and the keyboard all have to be looking at the
+            // same set of them.
             while let Ok(report) = reports.try_recv() {
                 reported(report, held, world, shape);
+            }
+            while let Ok(report) = retirements.try_recv() {
+                retired(report, held, world, &latest);
             }
 
             // What is in the slot is settled once, at the top of the frame. The
@@ -318,7 +362,13 @@ pub fn run(held: &mut Held, world: &World) -> Result<()> {
             // A frame's worth of one short string, against a keystroke reaching
             // the wrong spawn.
             let addressed = showing.pane().map(str::to_string);
-            let listing = Listing::new(held.drafts.all(), &held.entries, &latest, &held.cursor);
+            let listing = Listing::new(
+                held.drafts.all(),
+                &held.entries,
+                &latest,
+                &held.retirements,
+                &held.cursor,
+            );
 
             terminal.draw(|frame| render(frame, listing, &showing))?;
 
@@ -358,6 +408,7 @@ pub fn run(held: &mut Held, world: &World) -> Result<()> {
                         creation::making(draft, wanted, world.worktrees.clone(), reporting.clone());
                     }
                 }
+                Asked::Retired => held.retire(world.server, retiring.clone()),
                 Asked::Edited(edit) => {
                     if let Some(draft) = held.cursor.draft() {
                         held.drafts.edit(draft, edit);
@@ -411,6 +462,27 @@ fn reported(report: Report, held: &mut Held, world: &World, slot: Size) {
     }
 }
 
+/// Do what one thing a retirement said calls for.
+///
+/// Everything a retirement has to say lands on the spawn it is about, which is
+/// the row in the list: somebody who asked for one and walked off to answer
+/// another spawn is looking at the list, not at the slot.
+///
+/// Only the last thing it says is ever anything else — that there is nothing of
+/// this spawn left, which is the app's cue to let go of every piece of it at
+/// once.
+fn retired(report: retirement::Report, held: &mut Held, world: &World, latest: &Snapshot) {
+    match report.said {
+        retirement::Said::Doing(step) => held.retirements.doing(&report.spawn, step),
+        retirement::Said::Refused(why) => held.retirements.refused(&report.spawn, why),
+        retirement::Said::Retired => {
+            if let Some(pane) = held.let_go_of(&report.spawn, &world.leaving, latest) {
+                world.client.forget(&pane);
+            }
+        }
+    }
+}
+
 /// Everything the app itself is holding: the spawns, the drafts, and which row
 /// the list is on.
 ///
@@ -423,6 +495,8 @@ pub struct Held {
     spawns: Spawns,
     /// Every draft being written or made.
     drafts: Drafts,
+    /// Where the retirements in flight have got to.
+    retirements: Retirements,
     /// Which row the list is on, and so what the slot holds.
     cursor: Cursor,
     /// What the list says about the spawns.
@@ -435,17 +509,90 @@ pub struct Held {
 
 impl Held {
     /// What the app starts with: the spawns it was given, whatever drafts there
-    /// are, and the selection on the first spawn there is.
+    /// are, and the selection on the first row of the list.
+    ///
+    /// **Which is a spawn when there is one, and a draft when there is not.**
+    /// An app opened with nothing to start has one row and it is the form, so
+    /// the first thing on screen is the thing there is to do; an app opened on
+    /// sessions puts you on one of those, because the drafts are what you would
+    /// have gone to `F2` for.
     pub fn new(spawns: Spawns, drafts: Drafts) -> Self {
         let entries = spawns.entries();
-        let cursor = Cursor::on_spawn(&entries[0].spawn);
+        let cursor = match (entries.first(), drafts.all().first()) {
+            (Some(entry), _) => Cursor::on_spawn(&entry.spawn),
+            (None, Some(draft)) => Cursor::on_draft(draft.id()),
+            (None, None) => Cursor::default(),
+        };
 
         Self {
             spawns,
             drafts,
+            retirements: Retirements::default(),
             cursor,
             entries,
         }
+    }
+
+    /// Ask for the spawn the list is on to be retired.
+    ///
+    /// **Only a spawn, and only the one the selection is on.** A draft has
+    /// nothing to retire — no session, no worktree, nothing on disk at all —
+    /// and the key doing something to whichever spawn happened to be underneath
+    /// would be the app choosing what to stop.
+    ///
+    /// The work goes on a thread, like a creation's: stopping a session takes
+    /// as long as it takes, and every other spawn keeps drawing meanwhile.
+    fn retire(&mut self, server: &Server, retiring: Sender<retirement::Report>) {
+        let Some(name) = self.cursor.spawn().map(str::to_string) else {
+            return;
+        };
+        let Some(spawn) = self.spawns.of(&name) else {
+            return;
+        };
+        let pane = spawn.pane.clone();
+        let worktree = PathBuf::from(&spawn.entry.worktree);
+
+        if self.retirements.asked_for(&name) {
+            retirement::retiring(name, pane, worktree, server.clone(), retiring);
+        }
+    }
+
+    /// Let go of a spawn that has been retired, and say which pane it was in.
+    ///
+    /// Everything the app was holding of it goes at once — the row, and the
+    /// supervisor's interest in a pane that is no longer there. Anything left
+    /// behind would be the app watching something it has itself removed, and
+    /// then reporting that it cannot find it.
+    ///
+    /// **The pane comes back rather than being dealt with here**, because the
+    /// grid behind it belongs to the control client, and the client is not
+    /// something the app's own state holds — the same reason the supervisor is
+    /// told down a channel rather than asked.
+    ///
+    /// **The selection only moves if it was on the spawn that went.** It lands
+    /// on the first row of what is left, which is where the attention-first
+    /// order puts whatever most needs somebody — and on nothing at all when
+    /// there is nothing left to be on.
+    fn let_go_of(
+        &mut self,
+        name: &str,
+        leaving: &Sender<String>,
+        latest: &Snapshot,
+    ) -> Option<String> {
+        let retired = self.spawns.let_go_of(name)?;
+
+        self.entries = self.spawns.entries();
+        self.retirements.finished(name);
+        // A supervisor that has gone means the app is on its way out, and a
+        // spawn it goes on watching is a row nothing draws.
+        let _ = leaving.send(name.to_string());
+
+        if self.cursor.spawn() == Some(name) {
+            let order = list::order(self.drafts.all(), &self.entries, latest);
+            self.cursor.moved(&order, Step::Down);
+        }
+
+        Some(retired.pane)
     }
 
     /// Take a spawn that has just started.
@@ -485,6 +632,11 @@ pub enum InTheSlot<'a> {
     Session(&'a Spawn),
     /// A draft, and the form it is being written in.
     Composing(&'a Draft),
+    /// Nothing: every spawn there was has been retired, and no draft has been
+    /// started since. The list is still there — it is the only thing that is —
+    /// and what it says the keyboard does is how there comes to be something in
+    /// the slot again.
+    Nothing,
 }
 
 impl InTheSlot<'_> {
@@ -493,6 +645,7 @@ impl InTheSlot<'_> {
         match self {
             InTheSlot::Session(spawn) => Typing::IntoTheSpawn(spawn.modes()),
             InTheSlot::Composing(_) => Typing::IntoTheDraft,
+            InTheSlot::Nothing => Typing::Nowhere,
         }
     }
 
@@ -501,7 +654,7 @@ impl InTheSlot<'_> {
     fn pane(&self) -> Option<&str> {
         match self {
             InTheSlot::Session(spawn) => Some(&spawn.pane),
-            InTheSlot::Composing(_) => None,
+            InTheSlot::Composing(_) | InTheSlot::Nothing => None,
         }
     }
 }
@@ -510,7 +663,9 @@ impl InTheSlot<'_> {
 fn in_the_slot<'a>(spawns: &'a Spawns, drafts: &'a Drafts, cursor: &Cursor) -> InTheSlot<'a> {
     match cursor.draft().and_then(|draft| drafts.of(draft)) {
         Some(draft) => InTheSlot::Composing(draft),
-        None => InTheSlot::Session(spawns.showing(cursor)),
+        None => spawns
+            .showing(cursor)
+            .map_or(InTheSlot::Nothing, InTheSlot::Session),
     }
 }
 
@@ -521,6 +676,8 @@ enum Typing {
     IntoTheSpawn(Modes),
     /// Into the draft in the slot, which never leaves the app.
     IntoTheDraft,
+    /// Nowhere: the slot is empty, so an ordinary key has nothing to mean.
+    Nowhere,
 }
 
 /// What the user did with the keyboard.
@@ -535,6 +692,8 @@ enum Asked {
     Composed,
     /// To make the draft in the slot into a spawn.
     Started,
+    /// To retire the spawn the list is on.
+    Retired,
     /// Something for the draft in the slot.
     Edited(Edit),
     /// Something for the spawn, already in the bytes a terminal would send.
@@ -576,11 +735,13 @@ fn what_it_means(key: KeyEvent, typing: Typing) -> Asked {
         QUIT => Asked::Quit,
         COMPOSE => Asked::Composed,
         START => Asked::Started,
+        RETIRE => Asked::Retired,
         UP => Asked::Moved(Step::Up),
         DOWN => Asked::Moved(Step::Down),
         _ => match typing {
             Typing::IntoTheSpawn(modes) => Asked::Typed(keys::typed(key, modes)),
             Typing::IntoTheDraft => edited(key).map_or(Asked::Nothing, Asked::Edited),
+            Typing::Nowhere => Asked::Nothing,
         },
     }
 }
@@ -661,6 +822,9 @@ pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
 
             caret
         }
+        // Nothing drawn and no caret: there is nowhere for what you type to go,
+        // and a cursor sitting in an empty region would say there was.
+        InTheSlot::Nothing => None,
     };
 
     if let Some((column, row)) = caret
@@ -743,6 +907,7 @@ mod tests {
             &[],
             &entries,
             snapshot,
+            &Retirements::default(),
             &cursor,
             &InTheSlot::Session(&spawn),
         )
@@ -754,6 +919,7 @@ mod tests {
         drafts: &[Draft],
         entries: &[Entry],
         snapshot: &Snapshot,
+        retirements: &Retirements,
         cursor: &Cursor,
         showing: &InTheSlot,
     ) -> String {
@@ -763,7 +929,7 @@ mod tests {
             .draw(|frame| {
                 render(
                     frame,
-                    Listing::new(drafts, entries, snapshot, cursor),
+                    Listing::new(drafts, entries, snapshot, retirements, cursor),
                     showing,
                 );
             })
@@ -919,7 +1085,13 @@ mod tests {
             .draw(|frame| {
                 render(
                     frame,
-                    Listing::new(&[], &entries(), &Snapshot::default(), &Cursor::default()),
+                    Listing::new(
+                        &[],
+                        &entries(),
+                        &Snapshot::default(),
+                        &Retirements::default(),
+                        &Cursor::default(),
+                    ),
                     showing,
                 );
             })
@@ -1087,10 +1259,11 @@ mod tests {
     }
 
     #[test]
-    fn the_app_keeps_five_keys_and_the_spawn_gets_every_other() {
+    fn the_app_keeps_six_keys_and_the_spawn_gets_every_other() {
         assert!(matches!(pressed(QUIT), Asked::Quit));
         assert!(matches!(pressed(COMPOSE), Asked::Composed));
         assert!(matches!(pressed(START), Asked::Started));
+        assert!(matches!(pressed(RETIRE), Asked::Retired));
         assert!(matches!(pressed(UP), Asked::Moved(Step::Up)));
         assert!(matches!(pressed(DOWN), Asked::Moved(Step::Down)));
         assert!(matches!(pressed(KeyCode::Char('2')), Asked::Typed(bytes) if bytes == b"2"));
@@ -1118,6 +1291,7 @@ mod tests {
             Asked::Edited(Edit::Erased)
         ));
         assert!(matches!(typed_at_a_draft(START), Asked::Started));
+        assert!(matches!(typed_at_a_draft(RETIRE), Asked::Retired));
     }
 
     #[test]
@@ -1186,7 +1360,6 @@ mod tests {
                 "the third spawn is talking",
             ),
         ])
-        .unwrap()
     }
 
     /// The whole screen, with the list on the named spawn.
@@ -1202,11 +1375,22 @@ mod tests {
     /// The whole screen, drafts and all — the slot holding whatever the cursor
     /// is on, which is the app's own rule about the slot rather than the test's.
     fn with_drafts(spawns: &Spawns, drafts: &Drafts, cursor: &Cursor) -> String {
+        with_retirements(spawns, drafts, &Retirements::default(), cursor)
+    }
+
+    /// The same, with some spawns being retired.
+    fn with_retirements(
+        spawns: &Spawns,
+        drafts: &Drafts,
+        retirements: &Retirements,
+        cursor: &Cursor,
+    ) -> String {
         painted(
             TERMINAL,
             drafts.all(),
             &spawns.entries(),
             &Snapshot::default(),
+            retirements,
             cursor,
             &in_the_slot(spawns, drafts, cursor),
         )
@@ -1317,7 +1501,14 @@ mod tests {
         let mut visited = Vec::new();
         for _ in 0..=order.len() {
             cursor.moved(&order, Step::Down);
-            visited.push(On::Spawn(spawns.showing(&cursor).entry.spawn.clone()));
+            visited.push(On::Spawn(
+                spawns
+                    .showing(&cursor)
+                    .expect("a spawn in the slot")
+                    .entry
+                    .spawn
+                    .clone(),
+            ));
         }
 
         assert_eq!(
@@ -1337,12 +1528,16 @@ mod tests {
         let spawns = several();
 
         assert_eq!(
-            spawns.showing(&Cursor::on_spawn("fix-the-flake-b2c9")).pane,
+            spawns
+                .showing(&Cursor::on_spawn("fix-the-flake-b2c9"))
+                .expect("a spawn in the slot")
+                .pane,
             "%2"
         );
         assert_eq!(
             spawns
                 .showing(&Cursor::on_spawn("drop-the-cache-d4e1"))
+                .expect("a spawn in the slot")
                 .pane,
             "%3"
         );
@@ -1378,12 +1573,37 @@ mod tests {
                 spawn.entry.spawn
             );
         }
-        assert_eq!(spawns.shape(), bigger);
+        assert_eq!(spawns.shape(), Some(bigger));
     }
 
+    /// The other way in: the app opened with nothing to start, which is one row
+    /// and it is the form. Somebody who ran it to *decide* what to work on is
+    /// looking at the one thing there is to do, without having pressed a key.
     #[test]
-    fn the_app_will_not_run_with_nothing_to_put_in_the_slot() {
-        assert!(Spawns::new(Vec::new()).is_err());
+    fn an_app_opened_with_nothing_to_start_opens_on_the_draft() {
+        let held = Held::new(Spawns::new(Vec::new()), drafting(&[""]));
+
+        assert_eq!(held.cursor.draft(), Some(held.drafts.all()[0].id()));
+        assert!(matches!(
+            in_the_slot(&held.spawns, &held.drafts, &held.cursor),
+            InTheSlot::Composing(_)
+        ));
+        let screen = on_screen(&held);
+        assert!(screen.contains("NEW SPAWN"), "{screen}");
+        assert!(screen.contains("Repository"), "{screen}");
+        assert!(
+            screen.contains("SPAWNS"),
+            "the list is not there:\n{screen}"
+        );
+    }
+
+    /// And a draft does not take the selection when sessions were asked for:
+    /// those are what the person who named them is there to look at.
+    #[test]
+    fn an_app_opened_on_sessions_opens_on_one_of_them() {
+        let held = Held::new(several(), drafting(&["a draft as well"]));
+
+        assert_eq!(held.cursor.spawn(), Some("add-retry-logic-a7f3"));
     }
 
     // Drafts: the other thing the slot can hold.
@@ -1495,7 +1715,7 @@ mod tests {
 
     /// The whole screen, as this app is holding it.
     fn on_screen(held: &Held) -> String {
-        with_drafts(&held.spawns, &held.drafts, &held.cursor)
+        with_retirements(&held.spawns, &held.drafts, &held.retirements, &held.cursor)
     }
 
     #[test]
@@ -1613,6 +1833,173 @@ mod tests {
             held.entries
                 .iter()
                 .any(|entry| entry.spawn == "start-the-scheduler-c8d2")
+        );
+    }
+
+    // Retiring a spawn, which is the other thing that changes what the app is
+    // holding while it runs — and the only one that takes something away.
+
+    /// Everything the app is holding, with three spawns and nothing drafted.
+    fn holding() -> Held {
+        Held::new(several(), Drafts::new(Vec::new()))
+    }
+
+    #[test]
+    fn a_spawn_that_has_been_retired_leaves_the_list_and_the_supervisor_lets_go_of_it() {
+        let mut held = holding();
+        let (leaving, left) = mpsc::channel();
+
+        let pane = held.let_go_of("fix-the-flake-b2c9", &leaving, &Snapshot::default());
+
+        assert_eq!(
+            pane.as_deref(),
+            Some("%2"),
+            "the pane it was in was not said"
+        );
+        assert_eq!(
+            left.try_recv().ok(),
+            Some("fix-the-flake-b2c9".to_string()),
+            "the supervisor is still watching a pane that has gone"
+        );
+        let screen = on_screen(&held);
+        assert!(
+            !screen.contains("fix-the-flake-b2c9"),
+            "the retired spawn still has a row:\n{screen}"
+        );
+        assert!(
+            !screen.contains("the second spawn is talking"),
+            "the retired spawn is still in the slot:\n{screen}"
+        );
+        assert_eq!(held.entries, held.spawns.entries());
+        for still_there in ["add-retry-logic-a7f3", "drop-the-cache-d4e1"] {
+            assert!(
+                screen.contains(still_there),
+                "the list lost more than the spawn that went:\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_selection_follows_a_retired_spawn_off_its_row_and_stays_put_otherwise() {
+        let mut moved_from_it = holding();
+        moved_from_it.cursor = Cursor::on_spawn("fix-the-flake-b2c9");
+        let mut left_alone = holding();
+        left_alone.cursor = Cursor::on_spawn("drop-the-cache-d4e1");
+        let (leaving, _left) = mpsc::channel();
+
+        moved_from_it.let_go_of("fix-the-flake-b2c9", &leaving, &Snapshot::default());
+        left_alone.let_go_of("fix-the-flake-b2c9", &leaving, &Snapshot::default());
+
+        assert_eq!(
+            moved_from_it.cursor.spawn(),
+            Some("add-retry-logic-a7f3"),
+            "the selection was left on a row that is not there any more"
+        );
+        assert_eq!(
+            left_alone.cursor.spawn(),
+            Some("drop-the-cache-d4e1"),
+            "retiring one spawn moved the selection off another"
+        );
+    }
+
+    /// The state the app can now reach that it never could before: everything
+    /// retired, and the list still there. **Nothing hides the list** — least of
+    /// all having nothing to put beside it.
+    #[test]
+    fn retiring_the_last_spawn_leaves_an_empty_slot_with_the_list_beside_it() {
+        let mut held = holding();
+        let (leaving, _left) = mpsc::channel();
+
+        for spawn in [
+            "add-retry-logic-a7f3",
+            "fix-the-flake-b2c9",
+            "drop-the-cache-d4e1",
+        ] {
+            held.let_go_of(spawn, &leaving, &Snapshot::default());
+        }
+
+        assert!(matches!(
+            in_the_slot(&held.spawns, &held.drafts, &held.cursor),
+            InTheSlot::Nothing
+        ));
+        let screen = on_screen(&held);
+        assert!(
+            screen.contains("SPAWNS"),
+            "the list has gone too:\n{screen}"
+        );
+        assert!(
+            screen.contains("F2 starts a draft"),
+            "nothing says how to start one again:\n{screen}"
+        );
+        for talking in [
+            "the first spawn is talking",
+            "the second spawn is talking",
+            "the third spawn is talking",
+        ] {
+            assert!(
+                !screen.contains(talking),
+                "{talking} is still there:\n{screen}"
+            );
+        }
+    }
+
+    /// With nothing in the slot there is nowhere for an ordinary key to go, and
+    /// the app's own keys are still the app's — which is how there comes to be
+    /// something in the slot again.
+    #[test]
+    fn an_empty_slot_takes_the_apps_keys_and_swallows_everything_else() {
+        assert!(matches!(
+            what_it_means(
+                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+                Typing::Nowhere
+            ),
+            Asked::Nothing
+        ));
+        assert!(matches!(
+            what_it_means(KeyEvent::new(COMPOSE, KeyModifiers::NONE), Typing::Nowhere),
+            Asked::Composed
+        ));
+    }
+
+    #[test]
+    fn a_spawn_that_was_never_here_is_not_let_go_of_twice() {
+        let mut held = holding();
+        let (leaving, _left) = mpsc::channel();
+
+        assert_eq!(
+            held.let_go_of("retired-long-ago", &leaving, &Snapshot::default()),
+            None
+        );
+        assert_eq!(held.entries.len(), 3);
+    }
+
+    /// The key acts on the row rather than on what is in the slot — and on a
+    /// draft it does nothing at all, because a draft has no session and nothing
+    /// on disk to release.
+    #[test]
+    fn asking_to_retire_says_so_on_the_spawns_row_and_does_nothing_to_a_draft() {
+        let tmux = crate::tmux::tests::PrivateTmux::start("app-asks-for-a-retirement");
+        let mut held = Held::new(several(), drafting(&["half a sentence and"]));
+        let (retiring, _reports) = mpsc::channel();
+
+        held.cursor = Cursor::on_draft(held.drafts.all()[0].id());
+        held.retire(&tmux.server, retiring.clone());
+        assert!(
+            held.retirements.of("add-retry-logic-a7f3").is_none(),
+            "a draft in the slot retired a spawn"
+        );
+
+        held.cursor = Cursor::on_spawn("add-retry-logic-a7f3");
+        held.retire(&tmux.server, retiring);
+
+        assert!(
+            held.retirements.of("add-retry-logic-a7f3").is_some(),
+            "the row says nothing about the retirement that was asked for"
+        );
+        let screen = on_screen(&held);
+        assert!(
+            screen.contains("▍- add-retry-logic-a7f3"),
+            "the row does not say it is being retired:\n{screen}"
         );
     }
 

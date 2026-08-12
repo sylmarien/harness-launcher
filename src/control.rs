@@ -170,6 +170,18 @@ impl Client {
         grid
     }
 
+    /// Let go of a pane's grid.
+    ///
+    /// For a spawn that has been retired, whose window has gone with it: what a
+    /// grid holds is a screenful of the app's own memory, and the reader would
+    /// carry on holding it for a pane nothing will ever arrive from again.
+    ///
+    /// Output for a pane with no grid is dropped, so a notification still in
+    /// flight when this is called is the ordinary case rather than a race.
+    pub fn forget(&self, pane: &str) {
+        self.grids.lock().expect(POISONED).remove(pane);
+    }
+
     /// Type at a spawn.
     ///
     /// Bytes as hex, which is the one encoding that survives arbitrary
@@ -617,6 +629,25 @@ mod tests {
             .unwrap();
 
         until(&grid, "first thing drawn");
+    }
+
+    /// What retiring a spawn leaves behind, which is nothing: the grid is let
+    /// go of, and the pane the app no longer has is one the reader no longer
+    /// routes anything to.
+    #[test]
+    fn a_pane_the_app_has_let_go_of_has_no_grid_left_behind() {
+        let tmux = PrivateTmux::start("control-forgets-a-retired-pane");
+        let session = tmux.server.session(SLOT).unwrap();
+        let client = Client::attach(&tmux.server, &session, SLOT).unwrap();
+        let pane = tmux.server.open_window(&session, "spawn").unwrap();
+        client.watch(&pane, SLOT);
+
+        client.forget(&pane);
+
+        assert!(
+            !client.grids.lock().unwrap().contains_key(&pane),
+            "a retired spawn's screen is still held"
+        );
     }
 
     #[test]
