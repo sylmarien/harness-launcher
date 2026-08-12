@@ -21,7 +21,7 @@ Single-context — when domain docs are written, they go to one `CONTEXT.md` and
 - **Open a PR whenever a piece of work is finished** — don't wait to be asked. "Finished" is defined below.
 - **Never merge a PR.** Merging is the user's call, always. This includes auto-merge.
 - **On feedback, amend the existing PR** rather than opening a new one.
-- **A PR always carries exactly one commit**, unless explicitly instructed otherwise. Fold follow-up work in with `git commit --amend` or a rebase, then `git push --force-with-lease`.
+- **A PR always carries exactly one commit**, unless explicitly instructed otherwise. Fold follow-up work in with `git commit --amend` or a rebase, then `git push --force-with-lease`. `/orchestrate` is the standing exception: a queued run carries one commit per issue.
 - History rewriting is scoped: **only amend commits you authored, only on the feature branch you created.** Never rewrite history containing someone else's commits, and never force-push to the default branch or a shared branch.
 
 ### Definition of "finished"
@@ -40,16 +40,18 @@ Re-run it before any force-push that **changes behaviour**. Amendments that only
 
 ### Skills
 
-All 22 skills vendored in `.claude/skills/` appear below. This table is a **map, not a licence**: 13 of them are `disable-model-invocation: true` — the user reaches for those, an agent never invokes them unprompted. Within a row, ▸ marks that boundary: everything after it is user-invoked only.
+All 23 skills in `.claude/skills/` appear below — 22 vendored, plus `/orchestrate`, which is this project's own. This table is a **map, not a licence**: 14 of them are `disable-model-invocation: true` — the user reaches for those, an agent never invokes them unprompted. Within a row, ▸ marks that boundary: everything after it is user-invoked only.
 
 | Phase              | Skills                                                                       |
 | ------------------ | ---------------------------------------------------------------------------- |
 | Design exploration | `/grilling`, `/research`, `/prototype` · ▸ `/grill-me`, `/grill-with-docs`   |
 | Design             | `/codebase-design`, `/domain-modeling` · ▸ `/improve-codebase-architecture`  |
 | Planning           | ▸ `/wayfinder`, `/to-spec`, `/to-tickets`, `/triage`                         |
-| Implementation     | `/tdd`, `/resolving-merge-conflicts` · ▸ `/implement`                        |
+| Implementation     | `/tdd`, `/resolving-merge-conflicts` · ▸ `/implement`, `/orchestrate`        |
 | Diagnosis          | `/diagnosing-bugs`                                                           |
 | Review             | `/code-review`                                                               |
 | Meta               | ▸ `/handoff`, `/teach`, `/ask-matt`, `/writing-great-skills`, `/setup-matt-pocock-skills` |
 
-**Not covered by any skill:** the PR ritual above — open on finish, never merge, one commit per PR — is prose only.
+**`/orchestrate` runs a queue of issues** — `/orchestrate #36,37,39,41` — one sub-agent implementing each in turn, `/code-review` over every commit, the findings folded back into the commit that caused them, and one pull request that opens on the first commit and grows.
+
+**Not covered by any skill:** the PR ritual above — open on finish, never merge, one commit per PR — is prose only, except inside an `/orchestrate` run.

@@ -10,9 +10,12 @@ and are licensed MIT — see [`UPSTREAM-LICENSE`](./UPSTREAM-LICENSE).
 | Plugin version | 1.2.0 |
 | Vendored | 2026-08-01 |
 
-The 22 skills here are exactly the set listed in the upstream `.claude-plugin/plugin.json`
+22 of the skills here are exactly the set listed in the upstream `.claude-plugin/plugin.json`
 (the maintainer's curated set). The `deprecated/`, `in-progress/`, `misc/` and `personal/`
 trees were not vendored.
+
+**`orchestrate/` is this project's own**, not upstream — it is not covered by the licence above
+and does not come back if these are re-vendored.
 
 Directories are flattened: upstream `skills/<category>/<name>/` becomes `<name>/`, which
 is the layout Claude Code discovers. Skill contents are otherwise byte-for-byte upstream,
