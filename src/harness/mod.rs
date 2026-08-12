@@ -243,10 +243,21 @@ pub fn default_effort_level() -> Choice {
 /// argument vector rather than a shell string, nothing in it needs quoting.
 ///
 /// `CLAUDE_CODE_NO_FLICKER=1` forces the fullscreen renderer, which draws on the
-/// alternate screen. It is a requirement rather than a preference: parking and
-/// unparking a pane resizes it, and only the fullscreen renderer repaints
-/// cleanly when that happens. It also keeps a transcript out of tmux's
-/// scrollback, which is what makes twenty panes affordable.
+/// alternate screen. It is a requirement rather than a preference, and the
+/// reasons are the app's own rather than the multiplexer's: the grid the app
+/// holds per spawn is a **screen and not a history**, so a spawn costs one
+/// screenful of cells and twenty cost megabytes; and the alternate screen is
+/// what keeps a transcript out of a scrollback **the app does not implement** —
+/// under the classic renderer output scrolls off the top of the grid and is
+/// simply gone.
+///
+/// *Its two original reasons have both expired, and are recorded here because
+/// the superseded reasoning is the part that would otherwise be silently
+/// reinvented.* It was chosen for tmux's server memory, which stopped mattering
+/// when the app took the grids over, and reinforced by a redraw test about
+/// parking a pane — a mechanism that no longer exists. A decision's reasons can
+/// expire before the decision does; these were re-derived rather than
+/// inherited.
 ///
 /// The variable is the one Claude Code itself documents as the equivalent of the
 /// `tui: "fullscreen"` setting — *"the flicker-free alt-screen renderer with

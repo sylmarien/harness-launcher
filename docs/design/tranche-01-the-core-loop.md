@@ -166,6 +166,39 @@ The form asks *"which of these?"* rather than *"which effort level?"* — the ch
 supplied by the harness, and where a harness offers none, the control is omitted
 entirely rather than shown empty.
 
+### Getting rid of a draft
+
+> **Added 2026-08-12.** This section had no counterpart to *Retiring a spawn* below, and
+> the omission read as an oversight rather than as the asymmetry it is. Nothing here
+> changes a decision; it records one the implementation had to take and this document did
+> not carry.
+
+**Discarding a draft is deliberately asymmetric with retiring a spawn**, and the
+asymmetry is the whole of the design: a draft owns nothing. No process, no worktree, no
+branch, nothing on disk at all. So there is **no teardown, no ordering, no cleanliness
+check and no refusal** — the four things that make retirement the careful act it is have
+nothing to be about. It is the app letting go of its own state.
+
+**And yet it is the one place in the app that asks a question**, which is a genuinely new
+interaction pattern and the reason this is worth a section. Retiring can afford not to
+ask, because it *can* refuse: there is a worktree to look at, and a branch that outlives
+whatever happens. A draft is text in a slot, and there is nothing to look at afterwards —
+so the question is the only thing standing between one keystroke and a paragraph that
+exists nowhere else. **The first press asks; any other key answers it *no*.** One key
+means *yes* and everything else means *no*, because naming a second key for *no* would be
+a second thing to learn about the only question in the app, and somebody half-remembering
+which it was would press the other one.
+
+**One exception, and it refuses like anything else that cannot be taken back:** a draft in
+the middle of being made into a spawn. There is a worktree being created on a thread, and
+throwing away the row is throwing away the only record of what that thread made.
+
+**The question doubles as where a would-be orphaned worktree is announced.** A draft whose
+creation stopped part-way is holding the app's only note of a worktree and a branch that
+exist and that nothing is running for. Discarding it is the moment that note is lost, so
+it is the moment the question says what is about to go — which is the litter rule
+(*Quitting*, below) applied to the one act that could make litter invisible.
+
 ### Retiring a spawn
 
 An explicit act meaning *we are done with this spawn* — the only thing that releases
@@ -494,6 +527,18 @@ doing the work moved, from a separate process into a short-lived worker (§4.8).
 **Several drafts in flight at once still costs nothing**, and costs less than it did: a
 list of records rather than a pile of parked panes.
 
+**Getting rid of one is app-side state and nothing else**, which is what §2 means by the
+asymmetry with retiring: no server, no client, no channel, no thread and nothing on disk
+to undo. The mechanism is a record leaving a list. The only part of it that needed
+designing at all is the question — and the one refusal, which is a draft whose creation
+thread is still running (§4.8): the row is the only record of the worktree that thread
+made, so it cannot be the thing that goes.
+
+*Accepted cost, and it is the same one creation already pays:* a creation that failed
+leaves a worktree and a branch behind, and discarding the draft that records them is
+allowed. It is announced rather than prevented, because the alternative is a row nobody
+can get rid of.
+
 **No lock, and now no question of one.** A per-repository or global creation lock was
 already declined — the collision it would prevent is impossible, because names carry a
 random suffix and paths are never reused, and concurrent `git worktree add` was verified
@@ -509,7 +554,34 @@ stands; the argument for it got cheaper.
    **stopped**, immediately. The one signal that cannot go stale.
 2. **If alive, read the session status file**, keyed by `pane_pid`. `busy` and `waiting`
    → **working**; `idle` and `shell` → **stopped**.
-3. **If alive but the file will not resolve** → **unknown**, after a grace period.
+3. **If alive but the file will not resolve**, ask one tie-breaker: **what is holding
+   the pane's terminal?** Something that is not the harness → **stopped**. Asked only
+   *after* the grace period, never during it.
+4. **If it still will not resolve** → **unknown**, after the same grace period.
+
+   **The grace period gates rungs 3 and 4 together**, which is what keeps a spawn that
+   is merely starting up off both of them: inside it an unresolved spawn is taken at its
+   word and no tie-breaker is run, so there is no path from *still starting* to
+   *stopped*. Reading the wait as belonging to rung 4 alone would suggest one.
+
+> **Rung 3 recorded 2026-08-12.** The ladder was written with three rungs and shipped
+> with four. The tie-breaker appeared in §4.8 as a *cost* — "not a per-tick cost" — but
+> never here, in the section that is the ladder, which is where a reader goes to find out
+> how a status is decided. No decision changed; a step that decides a status was missing
+> from the account of how statuses are decided.
+
+**The tie-breaker only ever settles downwards**, and that direction is not a detail — it
+is the bias recorded below in this same section, applied. It can say *stopped* and it can
+never say *working*: a process holding a terminal is not an agent with something to do.
+And a probe that **fails**
+must never read as the agent being gone, because that would be the app manufacturing the
+one wrong answer it is not allowed to give. So the probe can move a spawn off `unknown`
+only towards the status that costs a glance, never towards the one that costs the product.
+
+**It is not a fourth status and does not widen the vocabulary.** It is rung 3 declining to
+spend `unknown` — which is supposed to mean the app's instrumentation is broken — on a
+spawn whose pane can be shown to have moved on. Three statuses; one more way of arriving
+at one of them.
 
 **Output is not a status signal**, and the §4.1 revision does not change that. The app
 now sees every byte a spawn draws, and it is tempting to read the stream — but a busy
@@ -808,6 +880,15 @@ Not decided, and not oversights:
   the draft, which keeps your text. Where the exit message and the start-up orphan report
   appear is not.
 
+  > **Still open; what tranche 1 shipped, recorded 2026-08-12.** Both reports go to **the
+  > shell**, which is where everything the app says before it takes the screen already
+  > lands — the start-up report just before the alternate screen covers it, the leaving
+  > report onto the original screen that comes back afterwards. *Accepted cost, and it is
+  > why this entry stays open:* the start-up report is therefore read on the way **out**
+  > rather than on the way in, sitting above the leaving report when the app's screen goes
+  > away. That is a placement chosen because the alternative was inventing a surface, not
+  > a decision this document has taken.
+
   > **The `unknown` half was closed 2026-08-12.** This entry also read *"how an `unknown`
   > spawn's reason reaches the slot"* was undecided. It is decided: the reason is drawn
   > **in the slot, over the top of the spawn's own screen rather than instead of it** — an
@@ -829,6 +910,27 @@ Not decided, and not oversights:
   makes it easier but no less undecided — and it is the mechanism behind two things the
   scope explicitly asks for, *typing into a spawn's prompt* and *interrupting it*. Worth
   knowing that it is the largest open item on this list.
+
+  > **What the split has become, recorded 2026-08-12.** The rule shipped is that **the
+  > app keeps seven function keys and the spawn gets every other key there is** — `F2`
+  > compose, `F3` discard, `F5` start, `F6`/`F7` move the selection, `F9` retire, `F10`
+  > quit. Function keys because every ordinary key belongs to the session: a digit is
+  > exactly what you send when a harness asks you to pick an option, and `q` is a letter
+  > somebody is in the middle of typing. **The app's keys are the app's whatever is in
+  > the slot**, including the two that only ever mean anything to a draft — a key that
+  > changed meaning with the selection would reach a spawn as a keystroke the moment the
+  > selection moved.
+  >
+  > **This is an inventory, not a decision.** Seven keys claimed one at a time by seven
+  > tickets is exactly the drift this entry exists to notice, and the entry stays open:
+  > nothing has been settled about what happens when the app wants an eighth, whether a
+  > modifier or a prefix would be better than more function keys, or how any of it is
+  > discoverable beyond the two standing footers that currently list it — the list's own
+  > and a draft's, the two a draft swaps in while it is being made or asking about being
+  > thrown away being shorter and transient. **Scrolling past a
+  > screenful is still untouched** — the list follows the selection far enough to keep it
+  > on screen and no further, and scrolling to a spawn the selection is *not* on does not
+  > exist.
 - **Distribution** — run from source, or something installable.
 - **Logging and diagnostics** — how the author debugs the app while twenty children run.
 - ~~**Answering the child's terminal queries**~~ — **closed 2026-08-10 during the

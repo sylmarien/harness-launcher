@@ -8,8 +8,23 @@
 //! 2. **If alive, what does the harness's own record say?** `working` and
 //!    `stopped` come straight back out as themselves.
 //! 3. **If alive but the record will not resolve** — an older harness, a
-//!    configuration directory somewhere else, a format that moved — the spawn
-//!    is **unknown**, once it is old enough for that to mean anything.
+//!    configuration directory somewhere else, a format that moved — one
+//!    tie-breaker is asked before giving up: **what is holding the pane's
+//!    terminal?** Something that is not the harness means the agent has gone,
+//!    which is **stopped**. It only ever settles downwards — a process holding
+//!    a terminal is not an agent with something to do, so the probe can never
+//!    say *working*, and a probe that fails must never read as the agent being
+//!    gone. **Asked only once the spawn is past the grace period below**, which
+//!    is the same condition rung 4 waits for: until then an unresolved spawn is
+//!    taken at its word, and no probe is run that could send one still starting
+//!    up straight to *stopped*.
+//! 4. **If it still will not resolve**, the spawn is **unknown**, once it is
+//!    old enough for that to mean anything.
+//!
+//! The tie-breaker is not a fourth status and does not widen the vocabulary; it
+//! is rung 3 refusing to spend `unknown` on a spawn whose pane can be shown to
+//! have moved on. It costs nothing on a tick where every record resolves,
+//! because it is only ever asked after one has failed.
 //!
 //! Everything here is a pure function over what the app read. It is the seam
 //! the design named for exactly that reason: three statuses and a grace period
