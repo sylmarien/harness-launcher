@@ -1,0 +1,29 @@
+# The toolchain is pinned so a working copy and CI lint with the same clippy.
+#
+# They did not, once. CI installed whatever stable was current and failed on
+# `unnecessary_sort_by`; the clippy in the container predated that lint, so
+# `cargo clippy` was honestly clean locally and the build broke anyway. A green
+# check that means "green on my machine" is worth very little, and the fix is to
+# make "our toolchain" a fact in the repository rather than a property of
+# whoever ran the command.
+#
+# Pinning buys that at the price of a different failure — sitting quietly on an
+# old release — so the pin is only half of this. The other half is **Dependabot**
+# (`.github/dependabot.yml`), which watches this file and opens a pull request
+# when stable moves past it. That pull request runs CI, so a bump arrives
+# already knowing whether it is clean: green, or with the failing check named.
+# It is what makes the update regular, visible, and somebody's to merge rather
+# than to remember.
+#
+# A second mechanism was tried and removed: a job running every check against
+# current stable on every pull request, to catch an upstream lint before the
+# bump. It was redundant once Dependabot's own pull request was the thing being
+# tested, and it spent most of its life skipping. Redundant machinery that
+# occasionally shows a red cross is worse than none.
+#
+# So this file decides what blocks, and Dependabot is what moves it. Bump it by
+# editing the channel here — nothing else needs changing, because everything
+# reads the pin from this one place rather than naming a version of its own.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
