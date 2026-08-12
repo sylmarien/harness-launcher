@@ -32,10 +32,34 @@ use crate::screen::Size;
 const SOCKET: &str = "harness-launcher";
 
 /// The one session every spawn is a window of.
-const SESSION: &str = "spawns";
+///
+/// Public because it is what the app is leaving behind: the reports on the way
+/// in and the way out both name it, so that somebody who wants to go and look at
+/// what is still running knows what to attach to.
+pub const SESSION: &str = "spawns";
 
 /// tmux's name for "leave a pane behind when what ran in it stops".
 const REMAIN_ON_EXIT: &str = "remain-on-exit";
+
+/// What the window that keeps the session alive is called.
+///
+/// Named rather than left to tmux, which would call it after whatever is
+/// running in it. Every other window in the session is named after the spawn it
+/// holds, so a name of the app's own here is what tells the furniture apart
+/// from the spawns — and the reports that say what is still running are built
+/// on exactly that distinction. Counting it would say one more spawn than there
+/// has ever been, at every start-up and every exit.
+const HOLDING: &str = "holding";
+
+/// What tmux prints in `#{pane_dead}` for a pane whose command has exited and
+/// which `remain-on-exit` kept.
+///
+/// **A value in somebody else's format, read in two places.** The listing every
+/// tick parses and the survey of what a session is holding both turn on it, and
+/// it is the one signal in the app that cannot go stale — so it is written down
+/// once rather than sitting as a bare `"1"` in two parsers that would have to be
+/// found together to be changed together.
+const DEAD: &str = "1";
 
 /// What holds a window open until there is something real to run in it.
 ///
@@ -55,6 +79,13 @@ const HOLDER: [&str; 3] = ["sh", "-c", "while :; do sleep 3600; done"];
 /// pane that stops disappears, and death would have to be inferred from absence
 /// — which is a different thing, and reported differently.
 const PANE_FORMAT: &str = "#{pane_id} #{pane_dead} #{pane_pid} #{pane_tty}";
+
+/// What the reports ask about every window of the holding session.
+///
+/// The window's name, which is the spawn's name, and whether what ran in it has
+/// stopped. Two fields, because a report says what is still running and names
+/// it, and needs nothing else to do either.
+const WINDOW_FORMAT: &str = "#{window_name} #{pane_dead}";
 
 /// One pane, as tmux reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +124,7 @@ impl Panes {
                 Some((
                     id.to_string(),
                     Pane {
-                        dead: dead == "1",
+                        dead: dead == DEAD,
                         pid,
                         tty: tty.to_string(),
                     },
@@ -159,6 +190,8 @@ impl Server {
                 "-d".to_string(),
                 "-s".to_string(),
                 SESSION.to_string(),
+                "-n".to_string(),
+                HOLDING.to_string(),
                 "-x".to_string(),
                 size.columns.to_string(),
                 "-y".to_string(),
@@ -213,6 +246,38 @@ impl Server {
         Ok(())
     }
 
+    /// The spawns still running in the holding session, or nothing at all if
+    /// there is no session to ask about.
+    ///
+    /// **This is the question both reports are**, and it is asked without
+    /// making anything: `has-session` first, so that a report taken before the
+    /// app has started anything does not itself create the session it is
+    /// reporting on. A report that brought its own subject into existence would
+    /// be a lie on every first run.
+    ///
+    /// **Nothing found is `None`, not a refusal.** A machine that has never run
+    /// this — or has rebooted since — has no server at all, and `has-session`
+    /// says so by exiting non-zero rather than by failing to run. That is an
+    /// answer, and the only honest one.
+    ///
+    /// Scoped with `-s` to the session rather than `-a` across the server, so
+    /// what comes back is the app's own spawns and not whatever else happens to
+    /// share the socket.
+    pub fn running(&self) -> Result<Option<Vec<String>>> {
+        if !process::run("tmux", &self.with_socket(&["has-session", "-t", SESSION]))?.ok {
+            return Ok(None);
+        }
+
+        Ok(Some(running_in(&self.run(&[
+            "list-panes",
+            "-s",
+            "-t",
+            SESSION,
+            "-F",
+            WINDOW_FORMAT,
+        ])?)))
+    }
+
     /// Every pane on the server, in one call.
     ///
     /// This is the whole of a tick's subprocess cost: twenty spawns are twenty
@@ -239,6 +304,34 @@ impl Server {
 
         all
     }
+}
+
+/// Which spawns a listing of the session's windows says are still running.
+///
+/// Two things are dropped, and for different reasons. The **holding** window is
+/// furniture — it is what keeps the session alive with no spawn in it. A window
+/// whose pane is **dead** is a spawn that has stopped, kept on the server by
+/// `remain-on-exit` so the list can say so; it is a leftover, but it is not
+/// something still running, and a report that conflated them would tell somebody
+/// twenty agents were mid-turn when none was.
+///
+/// A line that does not parse is dropped rather than guessed at, exactly as in
+/// [`Panes::parse`]: the alternative is a report naming a spawn that is not
+/// there.
+fn running_in(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            let dead = fields.next()?;
+            if name == HOLDING || dead == DEAD {
+                return None;
+            }
+
+            Some(name.to_string())
+        })
+        .collect()
 }
 
 /// A command that creates a pane, with the holder as what it starts.
@@ -357,6 +450,47 @@ pub(crate) mod tests {
 
         assert!(panes.get("%2").unwrap().dead);
         assert!(!panes.get("%0").unwrap().dead);
+    }
+
+    /// A real `list-panes -s` from a real tmux — see `captured/README.md`.
+    const CAPTURED_IN_SESSION: &str =
+        include_str!("../captured/tmux-list-panes-in-session.txt");
+
+    #[test]
+    fn the_spawns_a_session_is_holding_are_read_off_the_windows_they_are_in() {
+        let spawns = running_in(CAPTURED_IN_SESSION);
+
+        assert!(
+            spawns.contains(&"add-retry-logic-a7f3".to_string()),
+            "{spawns:?}"
+        );
+        assert!(
+            spawns.contains(&"fix-the-flake-b2c9".to_string()),
+            "{spawns:?}"
+        );
+    }
+
+    /// The window that keeps the session alive is furniture, and counting it
+    /// would say one more spawn than there has ever been.
+    #[test]
+    fn the_window_holding_the_session_open_is_not_one_of_the_spawns() {
+        let spawns = running_in(CAPTURED_IN_SESSION);
+
+        assert!(!spawns.contains(&HOLDING.to_string()), "{spawns:?}");
+    }
+
+    /// `remain-on-exit` keeps a stopped spawn's window on the server so the
+    /// list can still say it stopped. A report about what is *running* must not
+    /// read that as one still going.
+    #[test]
+    fn a_spawn_that_has_stopped_is_not_one_of_the_ones_still_running() {
+        let spawns = running_in(CAPTURED_IN_SESSION);
+
+        assert!(
+            !spawns.contains(&"drop-the-cache-d4e1".to_string()),
+            "a spawn whose window is only being kept by remain-on-exit was \
+             counted as running: {spawns:?}"
+        );
     }
 
     #[test]
@@ -541,6 +675,85 @@ pub(crate) mod tests {
         );
     }
 
+    /// The start-up report on a machine that has never run this, or has not run
+    /// it since a reboot: there is no server at all, which is *nothing found*
+    /// rather than a refusal. Asking must not be what brings a server into
+    /// existence.
+    #[test]
+    fn a_machine_holding_nothing_has_no_session_to_report() {
+        let tmux = PrivateTmux::start("nothing-is-held");
+
+        assert_eq!(tmux.server.running().unwrap(), None);
+    }
+
+    /// The whole of what a report is built from, against a real tmux: the
+    /// format string, the parse and what tmux actually prints, agreeing end to
+    /// end. The captured listing pins the parse; this pins that the app is
+    /// asking the question the capture was taken of.
+    #[test]
+    fn a_session_holding_spawns_reports_the_ones_still_running() {
+        let tmux = PrivateTmux::start("reports-what-is-running");
+        let session = tmux.server.session(SLOT).unwrap();
+        let going = tmux
+            .server
+            .open_window(&session, "add-retry-logic-a7f3")
+            .unwrap();
+        tmux.server
+            .start(&going, &tmux.recipe("sleep 120"))
+            .unwrap();
+        let stopped = tmux
+            .server
+            .open_window(&session, "drop-the-cache-d4e1")
+            .unwrap();
+        tmux.server.start(&stopped, &tmux.recipe("exit 3")).unwrap();
+        tmux.until("#{pane_dead}", |seen| seen.contains('1'));
+
+        let running = tmux.server.running().unwrap().expect("a session to report");
+
+        assert_eq!(
+            running,
+            ["add-retry-logic-a7f3"],
+            "the report is not the spawns that are still going"
+        );
+    }
+
+    /// **The report is a statement about the world, not a feature.** Asking
+    /// what is running must leave the world exactly as it found it — no session
+    /// made, no window opened, nothing attached, nothing adopted. Worth pinning
+    /// rather than assuming: `new-session -A` and an attaching client are both
+    /// one flag away from here, and either would make the act of reporting the
+    /// thing that changed the answer.
+    #[test]
+    fn asking_what_is_running_leaves_it_exactly_as_it_was() {
+        let tmux = PrivateTmux::start("asking-changes-nothing");
+        let shape = "#{window_name} #{pane_id} #{pane_dead}";
+
+        // With nothing there, asking twice must still find nothing: the first
+        // ask is the one that could have created a session to find.
+        assert_eq!(tmux.server.running().unwrap(), None);
+        assert_eq!(
+            tmux.server.running().unwrap(),
+            None,
+            "asking what was running is what brought a session into existence"
+        );
+
+        let session = tmux.server.session(SLOT).unwrap();
+        let pane = tmux
+            .server
+            .open_window(&session, "add-retry-logic-a7f3")
+            .unwrap();
+        tmux.server.start(&pane, &tmux.recipe("sleep 120")).unwrap();
+        let before = tmux.panes(shape);
+
+        tmux.server.running().unwrap();
+
+        assert_eq!(
+            tmux.panes(shape),
+            before,
+            "asking what was running changed what is running"
+        );
+    }
+
     /// How the server the user is sitting in front of is left alone: every
     /// command this module runs is addressed to a socket of the app's own.
     ///
@@ -565,6 +778,30 @@ pub(crate) mod tests {
             app.with_socket::<String>(&[]),
             ["-L", SOCKET],
             "the socket is not the first thing every command says"
+        );
+        // The reports go out the same road. `has-session` is the one that
+        // matters most here: it is asked before the app has made anything, so
+        // one that lost its `-L` would answer about whichever session the
+        // user's own server happens to call `spawns` — and the start-up report
+        // would describe somebody else's work as this app's litter.
+        assert_eq!(
+            app.with_socket(&["has-session", "-t", SESSION]),
+            ["-L", SOCKET, "has-session", "-t", SESSION],
+            "the report asked the user's own server what it was holding"
+        );
+        assert_eq!(
+            app.with_socket(&["list-panes", "-s", "-t", SESSION, "-F", WINDOW_FORMAT]),
+            [
+                "-L",
+                SOCKET,
+                "list-panes",
+                "-s",
+                "-t",
+                SESSION,
+                "-F",
+                WINDOW_FORMAT
+            ],
+            "the report read the user's own server's windows"
         );
     }
 
