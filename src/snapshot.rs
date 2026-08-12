@@ -859,6 +859,64 @@ mod tests {
         }
     }
 
+    /// **What the supervisor hands the list, five times a second, at twenty.**
+    ///
+    /// A tick keeps the snapshot it built — it is where a spawn it can no longer
+    /// read gets the last status it could — and sends a *copy* down the channel.
+    /// That is the obvious thing rather than the clever one, and the obvious
+    /// thing was chosen on the grounds that twenty rows are nothing to copy. This
+    /// is that assumption written down as an assertion, because it is the one
+    /// that would quietly stop being true if a row ever grew.
+    ///
+    /// Every row here carries the whole of what an unaccountable one does, which
+    /// is the expensive shape: four heap-allocated strings rather than one.
+    ///
+    /// The bound is loose by three orders of magnitude on purpose. What it is
+    /// aimed at is a row that has grown something a copy cannot afford; a bound
+    /// tight enough to catch a slow machine would fail on one.
+    ///
+    /// **It prints what it measured**, because the evidence document quotes this
+    /// cost and a number nothing emits cannot be checked against the test it is
+    /// attributed to:
+    ///
+    /// ```text
+    /// cargo test --release --bin harness-launcher -- --nocapture \
+    ///     a_snapshot_of_twenty_rows
+    /// ```
+    #[test]
+    fn a_snapshot_of_twenty_rows_is_cheap_enough_to_copy_every_tick() {
+        const COPIES: u32 = 1_000;
+
+        let snapshot = Snapshot {
+            rows: (0..20)
+                .map(|number| Row {
+                    name: format!("some-piece-of-work-{number:02}-a7f3"),
+                    status: Status::Unknown,
+                    unaccounted: Some(cannot_account(
+                        "its session record carries no status — the harness may be older \
+                         than the version that writes one",
+                        Some(Status::Working),
+                    )),
+                    last_known: Some(Status::Working),
+                })
+                .collect(),
+        };
+
+        let taken = Instant::now();
+        for _ in 0..COPIES {
+            drop(std::hint::black_box(snapshot.clone()));
+        }
+        let each = taken.elapsed() / COPIES;
+        println!("copying a snapshot of twenty unaccountable rows: {each:?} each");
+
+        assert!(
+            each < Duration::from_micros(100),
+            "copying a snapshot of twenty rows took {each:?}, which is no longer nothing \
+             beside the {:?} between ticks",
+            Duration::from_millis(200)
+        );
+    }
+
     #[test]
     fn every_watched_spawn_gets_a_row_in_the_order_it_is_watched() {
         let spawns = vec![
