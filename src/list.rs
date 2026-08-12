@@ -1213,21 +1213,32 @@ F10 quits — nothing is …"
             .chain((1..=8).map(|number| ("dotfiles", format!("chore-{number:02}"))))
             .collect();
 
+        a_list_of(&named, |spawn| match spawn {
+            "task-03" | "chore-02" => Status::Stopped,
+            "task-07" => Status::Unknown,
+            _ => Status::Working,
+        })
+    }
+
+    /// The entries and the snapshot for these spawns, with the statuses this
+    /// rule gives them.
+    ///
+    /// **Two lists of spawns are two sets of data, not two shapes.** What a list
+    /// is made *of* — an entry apiece, a row apiece, a status picked by name — is
+    /// the same however many repositories they are spread over, so it is written
+    /// once. A second copy of it is a second place for the list's own vocabulary
+    /// to drift, in the tests whose whole job is to notice that it has.
+    fn a_list_of(
+        named: &[(&str, String)],
+        status: impl Fn(&str) -> Status,
+    ) -> (Vec<Entry>, Snapshot) {
         let entries = named
             .iter()
             .map(|(repository, spawn)| entry(repository, spawn))
             .collect();
         let rows = named
             .iter()
-            .map(|(_, spawn)| {
-                let status = match spawn.as_str() {
-                    "task-03" | "chore-02" => Status::Stopped,
-                    "task-07" => Status::Unknown,
-                    _ => Status::Working,
-                };
-
-                said(spawn, status, None)
-            })
+            .map(|(_, spawn)| said(spawn, status(spawn), None))
             .collect();
 
         (entries, Snapshot { rows })
@@ -1309,6 +1320,98 @@ F10 quits — nothing is killed"
         );
         assert_ne!(stopped.style().fg, unknown.style().fg);
         assert_ne!(stopped.style().fg, working.style().fg);
+    }
+
+    /// Twenty spawns over four repositories, five apiece — the shape the
+    /// tranche is aimed at, and the one that was actually run.
+    fn twenty_over_four() -> (Vec<Entry>, Snapshot) {
+        let named: Vec<(&str, &str)> = vec![
+            ("harness-launcher", "fix-worktree-cleanup"),
+            ("harness-launcher", "control-mode-backpressure"),
+            ("harness-launcher", "prune-stale-symlinks"),
+            ("harness-launcher", "status-ladder-grace-period"),
+            ("harness-launcher", "rotate-the-deploy-keys"),
+            ("acme-api", "add-retry-logic"),
+            ("acme-api", "rate-limit-headers"),
+            ("acme-api", "idempotency-keys"),
+            ("acme-api", "terraform-state-locking"),
+            ("acme-api", "alert-on-disk-pressure"),
+            ("dotfiles", "drop-legacy-auth"),
+            ("dotfiles", "tidy-the-shell-prompt"),
+            ("dotfiles", "font-fallback-for-emoji"),
+            ("dotfiles", "cheaper-log-retention"),
+            ("dotfiles", "pagination-cursors"),
+            ("infra", "spawn-form-choices"),
+            ("infra", "openapi-drift-check"),
+            ("infra", "neovim-lsp-config"),
+            ("infra", "ssh-agent-forwarding"),
+            ("infra", "blue-green-cutover"),
+        ];
+        let named: Vec<(&str, String)> = named
+            .into_iter()
+            .map(|(repository, spawn)| (repository, spawn.to_string()))
+            .collect();
+
+        a_list_of(&named, |spawn| match spawn {
+            "prune-stale-symlinks" | "idempotency-keys" | "neovim-lsp-config" => Status::Stopped,
+            "font-fallback-for-emoji" => Status::Unknown,
+            _ => Status::Working,
+        })
+    }
+
+    /// **What twenty spawns over four repositories look like**, at the width the
+    /// list has on a wide terminal — which is the thing the tranche's headline
+    /// claim is about, and the one thing about it no assertion can settle.
+    ///
+    /// What an assertion *can* settle is that the density holds: one line per
+    /// spawn, four groups that are still four groups, each header carrying its
+    /// own bar, and the three statuses telling themselves apart by shape before
+    /// any colour is involved. That is what this pins, and it pins it by writing
+    /// the screen out — a list that stopped reading well would have to change
+    /// this text to pass, which is the point.
+    #[test]
+    fn twenty_spawns_over_four_repositories_read_as_four_projects() {
+        let (entries, snapshot) = twenty_over_four();
+
+        let screen = drawn(66, 33, &entries, &snapshot, &Cursor::default());
+
+        assert_eq!(
+            screen,
+            "\
+SPAWNS
+
+harness-launcher ●····
+ ● prune-stale-symlinks
+ · fix-worktree-cleanup
+ · control-mode-backpressure
+ · status-ladder-grace-period
+ · rotate-the-deploy-keys
+
+acme-api ●····
+ ● idempotency-keys
+ · add-retry-logic
+ · rate-limit-headers
+ · terraform-state-locking
+ · alert-on-disk-pressure
+
+dotfiles ?····
+ ? font-fallback-for-emoji
+ · drop-legacy-auth
+ · tidy-the-shell-prompt
+ · cheaper-log-retention
+ · pagination-cursors
+
+infra ●····
+ ● neovim-lsp-config
+ · spawn-form-choices
+ · openapi-drift-check
+ · ssh-agent-forwarding
+ · blue-green-cutover
+F2 starts a draft
+F6 / F7 move the selection
+F9 retires the spawn
+F10 quits — nothing is killed"
+        );
     }
 
     #[test]

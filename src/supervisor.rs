@@ -647,6 +647,89 @@ mod tests {
         }
     }
 
+    /// **What a tick costs at the count the tranche is aimed at**, against a
+    /// real tmux holding twenty real panes.
+    ///
+    /// The shape of the cost is the claim being held here, and it is a shape
+    /// rather than a number: **one subprocess however many spawns there are**,
+    /// and everything else a stat apiece. Twenty spawns must therefore cost
+    /// about what one costs plus twenty file stats — not twenty `list-panes`,
+    /// and not twenty `ps` probes, which is what a tick would degenerate into if
+    /// anybody moved the per-spawn work out of the tie-breaker.
+    ///
+    /// The bound is half the period between ticks, which is loose on purpose:
+    /// what would make this fail is a tick that grew a per-spawn subprocess, and
+    /// that costs twenty forks rather than a few extra milliseconds. A number
+    /// tight enough to catch a slow machine would fail on one.
+    ///
+    /// **Named for what it asserts.** That a tick is *one* listing however many
+    /// spawns there are is counted under `strace` by `tests/twenty_spawns.rs`,
+    /// which can see the processes the app starts; nothing here can, so nothing
+    /// here claims to. What this holds is the consequence: a tick that had grown
+    /// a per-spawn subprocess could not stay inside the bound below.
+    ///
+    /// **It prints what it measured**, because the evidence document quotes
+    /// these timings and a number nothing emits cannot be checked against the
+    /// test it is attributed to:
+    ///
+    /// ```text
+    /// cargo test --release --bin harness-launcher -- --nocapture \
+    ///     a_tick_at_twenty_spawns
+    /// ```
+    ///
+    /// What was actually observed, on a machine that says which one it was, is
+    /// in `docs/evidence/scale-at-twenty.md`.
+    #[test]
+    fn a_tick_at_twenty_spawns_stays_comfortably_inside_the_period_between_ticks() {
+        const SPAWNS: usize = 20;
+
+        let tmux = PrivateTmux::start("tick-at-twenty-spawns");
+        let session = tmux
+            .server
+            .session(Size {
+                columns: 80,
+                rows: 24,
+            })
+            .unwrap();
+        let watched: Vec<Watched> = (0..SPAWNS)
+            .map(|number| {
+                let name = format!("spawn-number-{number:02}");
+                let pane = tmux.server.open_window(&session, &name).unwrap();
+
+                Watched::new(name, pane)
+            })
+            .collect();
+        let (_arriving, arrivals) = mpsc::channel();
+        let (_leaving, departures) = mpsc::channel();
+        let mut supervisor = Supervisor::new(tmux.server.clone(), watched, arrivals, departures);
+
+        let mut ticks = Vec::new();
+        for _ in 0..10 {
+            let taken = Instant::now();
+            let snapshot = supervisor.tick();
+            ticks.push(taken.elapsed());
+            assert_eq!(
+                snapshot.rows.len(),
+                SPAWNS,
+                "a tick did not say something about every spawn"
+            );
+        }
+
+        let worst = ticks.iter().max().copied().unwrap_or_default();
+        let best = ticks.iter().min().copied().unwrap_or_default();
+        println!(
+            "a tick over {SPAWNS} spawns: {best:?} to {worst:?} over {} ticks, \
+             against the {TICK:?} between them",
+            ticks.len()
+        );
+
+        assert!(
+            worst < TICK / 2,
+            "a tick over {SPAWNS} spawns took {worst:?}, which is not comfortably inside the \
+             {TICK:?} between them: {ticks:?}"
+        );
+    }
+
     /// A spawn that has been retired stops being reported at all — and in
     /// particular does not come back as a pane the app cannot find, which is
     /// what a retired spawn still being watched looks like the moment its

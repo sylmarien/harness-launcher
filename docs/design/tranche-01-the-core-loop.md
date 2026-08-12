@@ -710,6 +710,17 @@ walking skeleton rather than a decision to take now.
 > continuously-redrawing fullscreen agents remain untested, and the risk as written stands
 > until something drives that many. Worth knowing what the test *would* catch first,
 > which is the failure that would otherwise look like one spawn being mysteriously blank.
+>
+> **Driven at twenty, 2026-08-12.** Twenty spawns over four repositories, each redrawing
+> a whole alternate screen five times a second, and **the single reader kept up**: the
+> screen was never more than one of a spawn's own repaints behind what that spawn had
+> drawn, and switching between spawns mid-turn took **1.2 ms**. A tick stayed **one
+> `list-panes` and a stat per live spawn**, with the `ps` probe running once in ten
+> seconds rather than per spawn. What was observed — including the tmux server's seven megabytes at twenty
+> panes, and everything the measurement does *not* cover — is in
+> [`docs/evidence/scale-at-twenty.md`](../evidence/scale-at-twenty.md). **The risk is
+> bounded rather than closed**: what drew was a stand-in at a fixed cadence, not twenty
+> real agents, which stays the thing to sit down and look at.
 
 **Screen priming is a genuine cost of control mode, not a wrinkle.** It streams only what
 is produced **while a client is attached** — attach after a child has already drawn itself
