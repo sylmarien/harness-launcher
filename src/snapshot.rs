@@ -153,11 +153,11 @@ pub struct Evidence {
 /// harness, a failed probe and a pane that vanished are one status and three
 /// sentences, not three statuses.
 ///
-/// The sentence is what the list has room for. The three facts beside it are for
-/// the slot, where somebody who opened the spawn is diagnosing *the app* — and
-/// what separates "the harness moved its records" from "this spawn died and the
-/// app has not noticed" is exactly which process would not resolve, whether its
-/// pane is still alive, and what the app could last tell.
+/// All of it is for the slot, where somebody who opened the spawn is diagnosing
+/// *the app* — and what separates "the harness moved its records" from "this
+/// spawn died and the app has not noticed" is exactly which process would not
+/// resolve, whether its pane is still alive, and what the app could last tell.
+/// The row it is about has one line and spends it on the spawn's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unaccounted {
     /// Why the app cannot tell, in one sentence.
@@ -176,8 +176,8 @@ impl Unaccounted {
     /// What to say about it where there is room to say it all — a line at a
     /// time, for whatever is drawing them.
     ///
-    /// **The list gets [`Unaccounted::why`] and this gets everything**, and the
-    /// difference is what each is for: a row says *something is wrong with this
+    /// **The row says nothing and this says everything**, and the difference is
+    /// what each is for: a row is one line saying *something is wrong with this
     /// one*, and the slot is where somebody who came to find out what goes about
     /// it. Naming the pane and the process is what makes the app diagnosable
     /// from outside itself — they are what `tmux list-panes` and `ps` are asked
@@ -227,17 +227,6 @@ pub struct Row {
     /// through its grace period on the way in, and the sentence saying nothing
     /// was ever read could never be printed.
     pub last_known: Option<Status>,
-}
-
-impl Row {
-    /// Why the app cannot tell what this spawn is doing, when it cannot.
-    ///
-    /// The sentence alone, which is what a row of the list has room for.
-    pub fn reason(&self) -> Option<&str> {
-        self.unaccounted
-            .as_ref()
-            .map(|unaccounted| unaccounted.why.as_str())
-    }
 }
 
 /// What the ladder would have said about a spawn it cannot account for.
@@ -503,12 +492,25 @@ mod tests {
             .clone()
     }
 
+    /// The sentence the ladder wrote about not being able to tell, when it wrote
+    /// one.
+    ///
+    /// The one part of an [`Unaccounted`] most of these tests are about: reaching
+    /// through the field on every assertion would bury what each of them is
+    /// checking. Nothing outside a test reads it on its own — the slot is drawn
+    /// from [`Unaccounted::explained`], which is all of it at once.
+    fn why(row: &Row) -> Option<&str> {
+        row.unaccounted
+            .as_ref()
+            .map(|unaccounted| unaccounted.why.as_str())
+    }
+
     #[test]
     fn a_working_agent_in_a_live_pane_is_working() {
         let row = row(&watched(ALIVE), &found(Reading::Working, None));
 
         assert_eq!(row.status, Status::Working);
-        assert_eq!(row.reason(), None);
+        assert_eq!(why(&row), None);
     }
 
     #[test]
@@ -534,7 +536,7 @@ mod tests {
         let row = row(&watched(GONE), &found(Reading::Working, None));
 
         assert_eq!(row.status, Status::Unknown);
-        assert!(row.reason().unwrap().contains("pane"));
+        assert!(why(&row).unwrap().contains("pane"));
     }
 
     #[test]
@@ -543,7 +545,7 @@ mod tests {
 
         assert_eq!(row.status, Status::Unknown);
         assert_eq!(
-            row.reason(),
+            why(&row),
             Some("its session record carries no status"),
             "the reason the app cannot tell was dropped"
         );
@@ -560,7 +562,7 @@ mod tests {
             Status::Working,
             "a spawn started a moment ago reported the tooling as broken"
         );
-        assert_eq!(row.reason(), None);
+        assert_eq!(why(&row), None);
     }
 
     #[test]
@@ -580,7 +582,7 @@ mod tests {
         );
 
         assert_eq!(row.status, Status::Stopped);
-        assert_eq!(row.reason(), None);
+        assert_eq!(why(&row), None);
     }
 
     #[test]
@@ -608,9 +610,9 @@ mod tests {
             Status::Unknown,
             "a failed probe was read as the agent being gone"
         );
-        let why = row.reason().unwrap().to_string();
-        assert!(why.contains("carries no status"), "{why}");
-        assert!(why.contains("not on PATH"), "{why}");
+        let said = why(&row).unwrap_or_default();
+        assert!(said.contains("carries no status"), "{said}");
+        assert!(said.contains("not on PATH"), "{said}");
     }
 
     /// **What the app has to be able to say about its own ignorance**, and it
@@ -846,7 +848,7 @@ mod tests {
         let row = row(&watched(ALIVE), &HashMap::new());
 
         assert_eq!(row.status, Status::Unknown);
-        assert!(row.reason().is_some());
+        assert!(why(&row).is_some());
     }
 
     #[test]
@@ -866,7 +868,7 @@ mod tests {
 
                 let row = &snapshot.rows[0];
                 assert_eq!(
-                    row.reason().is_some(),
+                    why(row).is_some(),
                     row.status == Status::Unknown,
                     "a reason became a status of its own: {row:?}"
                 );

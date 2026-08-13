@@ -22,6 +22,25 @@ use std::path::{Path, PathBuf};
 /// The program a spawn runs.
 const PROGRAM: &str = "claude";
 
+/// The glyph a row wears to say which harness its spawn is running.
+///
+/// Plain data beside the program name, like the models and the effort levels:
+/// which harness a spawn runs is a harness fact, so the one place that knows
+/// what the app launches is the one place that says what it looks like. There
+/// is one of these because there is one harness — a second arriving is what
+/// turns this into something with a harness on one side of it, and not before.
+///
+/// **One character**, because the row it goes on is measured in characters: the
+/// name beside it is cut to whatever is left of them, so a glyph of two would
+/// quietly take a character off every name in the list.
+///
+/// *Accepted cost, and it is the app's own convention rather than this
+/// constant's:* a character is not a cell, so a glyph a terminal chooses to draw
+/// double-width still pushes its row one cell over. Everything the app measures
+/// it measures in characters — the names, the cuts, the padding — and one glyph
+/// is not the place to start counting cells instead.
+pub const GLYPH: &str = "✻";
+
 /// One option the harness offers, as the spawn form will show it.
 ///
 /// The question this answers is "what does this harness let you choose?", not
@@ -472,6 +491,15 @@ mod tests {
                 "add retry logic to the client",
             ]
         );
+    }
+
+    /// The row's arithmetic is characters, and it spends exactly one of them on
+    /// this. A glyph of two would take a character out of the name beside it, on
+    /// every row in the list. What a terminal makes of the one character is the
+    /// terminal's, and no test here can hold it.
+    #[test]
+    fn the_glyph_a_row_wears_is_one_character_wide() {
+        assert_eq!(GLYPH.chars().count(), 1);
     }
 
     /// The check and the launch must be about the same program, or the app

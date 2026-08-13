@@ -896,11 +896,23 @@ Not decided, and not oversights:
   > instrumentation rather than the agent, and taking its screen away would hide a live
   > session in order to complain about the app's own eyesight. The top is what it covers,
   > because the bottom of a harness's screen is where it asks you things. It says more
-  > than the sentence the row carries: the pane, the process whose status would not
-  > resolve, that the pane is alive, and the last status the app managed to read — which
-  > are the facts that separate *the harness moved its records* from *this spawn died and
-  > the app has not noticed*. It is the app writing about itself, so it goes the moment
-  > the app can account for the spawn again.
+  > than the row's mark, which is all the row carries: the pane, the process whose
+  > status would not resolve, that the pane is alive, and the last status the app
+  > managed to read — which are the facts that separate *the harness moved its records*
+  > from *this spawn died and the app has not noticed*. It is the app writing about
+  > itself, so it goes the moment the app can account for the spawn again.
+
+  > **A retirement's sentence joined it there, recorded 2026-08-13.** What a retirement is
+  > doing, and why it refused, are drawn in the same band — the same mechanism and the
+  > same reasoning: it is the app writing about itself rather than the agent, and a spawn
+  > somebody has said they are done with is being stopped, so covering its screen costs
+  > nothing anybody was going to read. It arrived with the row collapsing to one line
+  > (there is no longer anywhere under a row for a sentence to go), and it took the
+  > list's copy of the unaccounted explanation with it — that had been drawn twice at
+  > once, on the row and in the band. **When both apply the retirement goes last**: it is
+  > the newest thing to have happened, and a refused retirement is what somebody who
+  > pressed the key came back to read. The row keeps a mark and nothing else, which is
+  > what a retirement says from across the list.
 - **Configuration** — whether the app remembers anything between runs, and where. The
   worktree root is deliberately not configurable.
 - **Keybindings, and scrolling past a screenful** — specifically how the keyboard is

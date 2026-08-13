@@ -672,8 +672,7 @@ mod tests {
             "a harness that would not start was given a status of its own: {row:?}"
         );
         assert_eq!(
-            row.reason(),
-            None,
+            row.unaccounted, None,
             "a spawn that simply stopped was reported as something the app cannot account for"
         );
     }
