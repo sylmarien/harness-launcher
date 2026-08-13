@@ -20,9 +20,19 @@
 //! **Nothing is a fixed size.** Every width in here is the width the list turned
 //! out to have this frame. Text that will not fit is cut with a mark that says
 //! it was cut, rather than wrapped into a second row that would break the one
-//! line per spawn the density depends on. The one exception is prose — the
-//! sentence saying why a spawn is `unknown` — which wraps, because a sentence
-//! cut at twenty-seven columns says nothing.
+//! line per spawn the density depends on.
+//!
+//! **One line per entry, whether or not it is selected**, and no exceptions: at
+//! fifteen or twenty spawns a row that grew when you stood on it would push the
+//! others off the screen to say what the slot beside it is already saying. Prose
+//! is never the list's — the sentence explaining a spawn the app cannot account
+//! for, and the one a retirement carries, are both drawn in the slot, over the
+//! top of a spawn that is either unreachable or being stopped.
+//!
+//! **The row the keyboard is on is painted** rather than only marked, because a
+//! one-character mark is a thing to hunt for in a list this long. What the band
+//! says is *where the keyboard is*, so it spans the whole width of the list —
+//! including the gutter, which gives up its own colour to it.
 //!
 //! **The selection is held by name, never by position.** Rows re-order as
 //! statuses change, and a cursor that remembered a row number would find itself
@@ -37,9 +47,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::draft::{self, Draft};
+use crate::harness::GLYPH;
 use crate::retirement::{Retirement, Retirements};
-use crate::scaffolding::{AMBER, DIM, ELLIPSIS, HEADING, gutter};
-use crate::scaffolding::{Footer, elided, scroll_offset, wrapped};
+use crate::scaffolding::{AMBER, DIM, ELLIPSIS, HEADING, band, gutter};
+use crate::scaffolding::{Footer, elided, scroll_offset};
 use crate::snapshot::{Row, Snapshot, Status};
 
 /// The mark against a draft being written.
@@ -67,9 +78,19 @@ const STOPPED: &str = "!";
 /// somebody said they were done with it.
 const RETIRING: &str = "-";
 
-/// How far a row's text sits from the left: the selection's gutter, the status
-/// mark, and the space between that and the name.
-const INDENT: usize = 3;
+/// How far a row's name sits from the left: the selection's gutter, the status
+/// mark, the column saying what the row runs under, and the space between that
+/// and the name.
+const INDENT: usize = 4;
+
+/// What a row that runs under no harness puts in the harness's column.
+///
+/// A draft is not running anything yet — that is what makes it a draft — so it
+/// says nothing there rather than claiming a session it has not started. It
+/// still spends the column, for the same reason a spawn the app has heard
+/// nothing about spends its status column: the names in one list line up, and a
+/// draft becoming a spawn must not shift its own row sideways.
+const NOTHING_YET: &str = " ";
 
 /// What the foot of the list says the keyboard does.
 ///
@@ -223,6 +244,16 @@ impl<'a> Listing<'a> {
         self.snapshot
     }
 
+    /// Where a spawn's retirement has got to, for whatever else on the screen
+    /// needs it.
+    ///
+    /// Here for the reason [`Listing::snapshot`] is, and it is the same reason:
+    /// the row says a retirement is happening and the slot says what it is
+    /// doing, and one frame drawn from two moments would have them disagree.
+    pub fn retirement(&self, spawn: &str) -> Option<&'a Retirement> {
+        self.retirements.of(spawn)
+    }
+
     /// The list of these drafts and spawns, as this snapshot found them.
     pub fn new(
         drafts: &'a [Draft],
@@ -264,12 +295,10 @@ impl<'a> Listing<'a> {
 
             for placed in &group.spawns {
                 let on_it = self.cursor.spawn() == Some(placed.name());
-                let from = lines.len();
-                lines.push(placed.row(on_it, width));
                 if on_it {
-                    lines.extend(placed.detail(width));
-                    selected = Some((from, lines.len() - 1));
+                    selected = Some((lines.len(), lines.len()));
                 }
+                lines.push(placed.row(on_it, width));
             }
         }
 
@@ -281,15 +310,17 @@ impl<'a> Listing<'a> {
 struct Rows {
     /// Every line there is, whether or not the region can hold them all.
     lines: Vec<Line<'static>>,
-    /// The first and last line the selected row occupies, if one is selected.
+    /// The first and last line the selected row occupies, if one is selected —
+    /// the same line twice, now that every row is one line. The pair is what
+    /// [`scroll_offset`] takes, because the form beside the list has controls
+    /// that are taller than a line.
     selected: Option<(usize, usize)>,
 }
 
 /// A draft's row: the gutter, its mark, and what it is called so far.
 ///
-/// One line and nothing under it, selected or not. There is nothing to say
-/// beneath it — a draft has made no branch and no worktree until it is started
-/// — and what it does have is in the slot beside it the moment it is selected.
+/// One line and nothing under it, selected or not. What it does have is in the
+/// slot beside it the moment it is selected.
 ///
 /// **The mark is the one thing about it that moves**, and it moves through the
 /// three things a draft can be: being written, being made into a spawn, and
@@ -299,22 +330,52 @@ struct Rows {
 /// Somebody who started one and went off to answer a spawn would otherwise have
 /// nothing telling them it had finished, or stopped.
 fn drafted(draft: &Draft, on_it: bool, width: usize) -> Line<'static> {
-    let (mark, how_it_reads) = if draft.stopped() {
-        (STOPPED, HEADING.fg(AMBER))
+    let shown = if draft.stopped() {
+        Shown {
+            mark: STOPPED,
+            how_it_reads: HEADING.fg(AMBER),
+        }
     } else if draft.starting() {
-        (STARTING, HEADING)
+        Shown {
+            mark: STARTING,
+            how_it_reads: HEADING,
+        }
     } else {
-        (DRAFT, HEADING)
+        Shown {
+            mark: DRAFT,
+            how_it_reads: HEADING,
+        }
     };
 
+    lined(&shown, NOTHING_YET, &draft.title(), on_it, width)
+}
+
+/// One row of the list, whatever it stands for: the gutter, the mark, the column
+/// saying what it runs under, and what it is called.
+///
+/// **Padded out to the full width of the list**, which is what makes the band
+/// under a selected row a band: a line that stopped at the end of its name would
+/// paint the name rather than the row, and read as a highlight on a word.
+///
+/// One builder for a draft's row and a spawn's, because the two are one shape
+/// with different things in the columns — written twice, they would be two
+/// places for the list's own geometry to be decided, and a name that lined up in
+/// one and not the other.
+fn lined(
+    shown: &Shown,
+    runs_under: &'static str,
+    name: &str,
+    on_it: bool,
+    width: usize,
+) -> Line<'static> {
+    let how_it_reads = shown.reading(on_it);
+    let room = width.saturating_sub(INDENT);
+
     Line::from(vec![
-        gutter(on_it),
-        Span::styled(mark, how_it_reads),
-        Span::raw(" "),
-        Span::styled(
-            elided(&draft.title(), width.saturating_sub(INDENT)),
-            how_it_reads,
-        ),
+        gutter(on_it, how_it_reads),
+        Span::styled(shown.mark, how_it_reads),
+        Span::styled(runs_under, how_it_reads),
+        Span::styled(format!(" {:<room$}", elided(name, room)), how_it_reads),
     ])
 }
 
@@ -426,11 +487,6 @@ impl Placed<'_> {
         self.row.map(|row| row.status)
     }
 
-    /// Why the app cannot tell what it is doing, when it cannot.
-    fn reason(&self) -> Option<&str> {
-        self.row.and_then(Row::reason)
-    }
-
     /// How it shows: what is happening to it if anything is, and what its agent
     /// is doing otherwise.
     ///
@@ -456,58 +512,17 @@ impl Placed<'_> {
         self.shown().span()
     }
 
-    /// Its own line: the gutter, its status, and its name.
+    /// Its own line: the gutter, its status, the glyph saying what it runs
+    /// under, and its name.
+    ///
+    /// **The branch and the worktree are not on it, and nowhere else on this
+    /// screen either.** Both are the spawn's own name under something fixed — a
+    /// branch prefix, one worktree root — so a row carrying them would spend
+    /// lines restating the one thing it already says. They are wanted once,
+    /// when somebody goes to find the work, and **the name is what they go back
+    /// with**: both are derivable from it, and the row keeps it.
     fn row(&self, selected: bool, width: usize) -> Line<'static> {
-        let shown = self.shown();
-
-        Line::from(vec![
-            gutter(selected),
-            shown.span(),
-            Span::raw(" "),
-            Span::styled(
-                elided(self.name(), width.saturating_sub(INDENT)),
-                shown.how_it_reads,
-            ),
-        ])
-    }
-
-    /// What it says beyond its name, when the list is on it.
-    ///
-    /// Under the selected row and nowhere else. The branch and the worktree are
-    /// what the app made and the user did not, and the reason is a sentence: on
-    /// every row they would cost twenty spawns sixty lines, which is the density
-    /// the list is for. Selecting a row is how you go and read them.
-    ///
-    /// A retirement's own sentence goes last, because it is the newest thing to
-    /// have happened — and a refused one is what the user is looking for.
-    fn detail(&self, width: usize) -> Vec<Line<'static>> {
-        let room = width.saturating_sub(INDENT);
-
-        let mut lines: Vec<Line<'static>> = [&self.entry.branch, &self.entry.worktree]
-            .into_iter()
-            .map(|text| indented(&elided(text, room), DIM))
-            .collect();
-        if let Some(why) = self.reason() {
-            lines.extend(
-                wrapped(why, room)
-                    .iter()
-                    .map(|line| indented(line, DIM.fg(AMBER))),
-            );
-        }
-        if let Some(retirement) = self.retirement {
-            let how_it_reads = if retirement.refused() {
-                DIM.fg(AMBER)
-            } else {
-                DIM
-            };
-            lines.extend(
-                wrapped(retirement.said(), room)
-                    .iter()
-                    .map(|line| indented(line, how_it_reads)),
-            );
-        }
-
-        lines
+        lined(&self.shown(), GLYPH, self.name(), selected, width)
     }
 }
 
@@ -567,11 +582,6 @@ fn attention(status: Option<Status>) -> u8 {
     }
 }
 
-/// A line of detail, lined up under the name it belongs to.
-fn indented(text: &str, how_it_reads: Style) -> Line<'static> {
-    Line::styled(format!("{}{text}", " ".repeat(INDENT)), how_it_reads)
-}
-
 /// How a status shows: a shape and a colour, which travel together.
 ///
 /// One type rather than two values, because they are one decision. Where they
@@ -588,6 +598,38 @@ impl Shown {
     /// The mark itself, ready to be drawn.
     fn span(&self) -> Span<'static> {
         Span::styled(self.mark, self.how_it_reads)
+    }
+
+    /// How the whole row reads, which is not the same thing when the keyboard is
+    /// on it: a selected row is painted, and everything on it goes black on the
+    /// band.
+    ///
+    /// **The status colour is not carried onto the band.** The marks tell every
+    /// state apart without any colour at all — that is what they are for — and
+    /// the one state where the colour was doing work, a spawn the app is
+    /// admitting something about, is the state the band takes its own colour
+    /// from.
+    fn reading(&self, selected: bool) -> Style {
+        if selected {
+            band(self.alarmed())
+        } else {
+            self.how_it_reads
+        }
+    }
+
+    /// Whether this is a row the app is admitting something about.
+    ///
+    /// **Read off the amber rather than listed again**, and the rule is exactly
+    /// that: a row is alarmed when it is already being drawn in [`AMBER`].
+    /// Amber is the colour the app admits things in and nothing else uses it, so
+    /// the states drawn in it *are* the states being admitted, however many of
+    /// them there come to be. Naming them here would be a second answer to a
+    /// settled question, and the two would come apart the first time a state was
+    /// added to one of them — as they would already, since a draft that stopped
+    /// without becoming a spawn is drawn in amber too and reaches this by the
+    /// same road.
+    fn alarmed(&self) -> bool {
+        self.how_it_reads.fg == Some(AMBER)
     }
 }
 
@@ -606,6 +648,14 @@ impl Shown {
 /// which is the brightest thing their theme has; naming a colour for it would
 /// be picking white, and white is invisible on half the terminals it would be
 /// picked for.
+///
+/// *The one exception, and it is the selected row's band.* That paints its own
+/// background, so what goes on top of it is arithmetic rather than a guess about
+/// a theme — black on cyan or on amber reads the same on every terminal there
+/// is. The rule this leaves behind is narrower than "the app names no colours"
+/// and is the one actually being kept: **the app names a foreground only where
+/// it has painted the background under it.** Everywhere else it puts a colour on
+/// a background it cannot see and has to leave it alone.
 fn shown_as(status: Option<Status>) -> Shown {
     let (mark, how_it_reads) = match status {
         Some(Status::Working) => ("·", Style::new().fg(Color::DarkGray)),
@@ -742,15 +792,16 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
-    /// The same, with some of the spawns being retired.
-    fn while_retiring(
+    /// The same, with some of the spawns being retired and nothing being
+    /// drafted — the cells, for the tests that ask what colour a row came out.
+    fn painted_on(
         width: u16,
         height: u16,
         entries: &[Entry],
         retirements: &Retirements,
         cursor: &Cursor,
-    ) -> String {
-        read(&painted(
+    ) -> Buffer {
+        painted(
             width,
             height,
             &[],
@@ -758,7 +809,18 @@ mod tests {
             &saying(None),
             retirements,
             cursor,
-        ))
+        )
+    }
+
+    /// What that says, for the tests written against the text of a screen.
+    fn while_retiring(
+        width: u16,
+        height: u16,
+        entries: &[Entry],
+        retirements: &Retirements,
+        cursor: &Cursor,
+    ) -> String {
+        read(&painted_on(width, height, entries, retirements, cursor))
     }
 
     /// The names of the spawns an order walks, in the order it walks them.
@@ -782,13 +844,13 @@ mod tests {
 SPAWNS
 
 harness-launcher ●?·
- ● fix-worktree-cleanup
- ? spawn-form-choices
- · add-retry-logic
+ ●✻ fix-worktree-cleanup
+ ?✻ spawn-form-choices
+ ·✻ add-retry-logic
 
 acme-api ●·
- ● drop-legacy-auth
- · rate-limit-headers
+ ●✻ drop-legacy-auth
+ ·✻ rate-limit-headers
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -796,11 +858,14 @@ F10 quits — nothing is killed"
         );
     }
 
+    /// **One line per spawn, the selected one included.** The row the keyboard
+    /// is on says no more than any other; what it has to say beyond its name is
+    /// in the slot beside it, which is where somebody who selected it is looking.
     #[test]
-    fn the_selection_is_a_mark_in_the_gutter_and_the_spawn_beneath_it() {
+    fn the_selected_spawn_is_one_line_like_every_other_row() {
         let screen = drawn(
             34,
-            16,
+            14,
             &five(),
             &saying(None),
             &Cursor::on_spawn("add-retry-logic"),
@@ -812,15 +877,13 @@ F10 quits — nothing is killed"
 SPAWNS
 
 harness-launcher ●?·
- ● fix-worktree-cleanup
- ? spawn-form-choices
-▍· add-retry-logic
-   spawn/add-retry-logic
-   /w/add-retry-logic
+ ●✻ fix-worktree-cleanup
+ ?✻ spawn-form-choices
+▍·✻ add-retry-logic
 
 acme-api ●·
- ● drop-legacy-auth
- · rate-limit-headers
+ ●✻ drop-legacy-auth
+ ·✻ rate-limit-headers
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -828,8 +891,11 @@ F10 quits — nothing is killed"
         );
     }
 
+    /// The sentence is the slot's, and only the slot's — it is drawn there over
+    /// the top of the spawn's own screen, and a second copy in the list would be
+    /// the same words in two places at once for a row that has one line.
     #[test]
-    fn the_reason_an_unknown_spawn_is_unknown_reads_under_the_selected_row() {
+    fn the_reason_an_unknown_spawn_is_unknown_is_not_in_the_list() {
         let screen = drawn(
             30,
             18,
@@ -838,28 +904,29 @@ F10 quits — nothing is killed"
             &Cursor::on_spawn("spawn-form-choices"),
         );
 
-        assert_eq!(
-            screen,
-            "\
-SPAWNS
-
-harness-launcher ●?·
- ● fix-worktree-cleanup
-▍? spawn-form-choices
-   spawn/spawn-form-choices
-   /w/spawn-form-choices
-   its session record carries
-   no status
- · add-retry-logic
-
-acme-api ●·
- ● drop-legacy-auth
- · rate-limit-headers
-F2 starts a draft
-F6 / F7 move the selection
-F9 retires the spawn
-F10 quits — nothing is killed"
+        assert!(screen.contains("▍?✻ spawn-form-choices"), "{screen}");
+        assert!(
+            !screen.contains("session record"),
+            "the list drew the sentence the slot is already drawing:\n{screen}"
         );
+    }
+
+    /// Both are the spawn's name under something fixed — a prefix and a root —
+    /// so a row carrying them would spend two lines restating the one it has.
+    /// What the row still says is that name, which is what somebody going to
+    /// find the work goes back with.
+    #[test]
+    fn a_row_says_neither_the_branch_nor_the_worktree() {
+        let screen = drawn(
+            60,
+            14,
+            &five(),
+            &saying(None),
+            &Cursor::on_spawn("add-retry-logic"),
+        );
+
+        assert!(!screen.contains("spawn/add-retry-logic"), "{screen}");
+        assert!(!screen.contains("/w/add-retry-logic"), "{screen}");
     }
 
     /// The rule stated as a test: a draft is a row of its own, above every
@@ -883,15 +950,15 @@ F10 quits — nothing is killed"
             "\
 SPAWNS
 
- + fix the worktree cleanup
+ +  fix the worktree cleanup
 
 harness-launcher ●?·
- ● fix-worktree-cleanup
- ? spawn-form-choices
- · add-retry-logic
+ ●✻ fix-worktree-cleanup
+ ?✻ spawn-form-choices
+ ·✻ add-retry-logic
 
 acme-api ●·
- ● drop-legacy-auth
+ ●✻ drop-legacy-auth
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -912,7 +979,7 @@ F10 quits — nothing is killed"
             &Cursor::default(),
         );
 
-        assert!(screen.contains(" + a new spawn"), "{screen}");
+        assert!(screen.contains(" +  a new spawn"), "{screen}");
     }
 
     #[test]
@@ -943,8 +1010,8 @@ F10 quits — nothing is killed"
 
         let screen = with_drafts(30, 14, drafts.all(), &five(), &saying(None), &on_it);
 
-        assert!(screen.contains("▍+ the second"), "{screen}");
-        assert!(screen.contains(" + the first"), "{screen}");
+        assert!(screen.contains("▍+  the second"), "{screen}");
+        assert!(screen.contains(" +  the first"), "{screen}");
     }
 
     /// The row is where a draft says which of the three things it is, because
@@ -974,9 +1041,9 @@ F10 quits — nothing is killed"
             &Cursor::default(),
         );
 
-        assert!(screen.contains(" + being written"), "{screen}");
-        assert!(screen.contains(" > being started"), "{screen}");
-        assert!(screen.contains(" ! stopped"), "{screen}");
+        assert!(screen.contains(" +  being written"), "{screen}");
+        assert!(screen.contains(" >  being started"), "{screen}");
+        assert!(screen.contains(" !  stopped"), "{screen}");
     }
 
     #[test]
@@ -1012,8 +1079,11 @@ F10 quits — nothing is killed"
         retirements
     }
 
+    /// The mark is the row's whole share of a retirement. What is happening to
+    /// the spawn is a sentence, and a sentence is the slot's — the spawn is
+    /// being stopped, so drawing over its screen costs nothing.
     #[test]
-    fn a_spawn_being_retired_says_so_on_its_row_and_says_what_is_happening_to_it() {
+    fn a_spawn_being_retired_says_so_on_its_row() {
         let retirements = being_retired("add-retry-logic", "stopping the session");
 
         let screen = while_retiring(
@@ -1025,12 +1095,12 @@ F10 quits — nothing is killed"
         );
 
         assert!(
-            screen.contains("▍- add-retry-logic"),
+            screen.contains("▍-✻ add-retry-logic"),
             "a spawn being retired reads like one that is working:\n{screen}"
         );
         assert!(
-            screen.contains("   stopping the session"),
-            "the row does not say what is happening to it:\n{screen}"
+            !screen.contains("stopping the session"),
+            "the list drew the sentence the slot is already drawing:\n{screen}"
         );
     }
 
@@ -1052,6 +1122,8 @@ F10 quits — nothing is killed"
             &retirements,
             &Cursor::on_spawn("add-retry-logic"),
         );
+        // Painted with the keyboard elsewhere: the amber is the row's own, and
+        // has to be there whether or not somebody is standing on it.
         let painted = painted(
             30,
             16,
@@ -1059,14 +1131,10 @@ F10 quits — nothing is killed"
             &five(),
             &saying(None),
             &retirements,
-            &Cursor::on_spawn("add-retry-logic"),
+            &Cursor::default(),
         );
 
-        assert!(screen.contains("▍! add-retry-logic"), "{screen}");
-        assert!(
-            screen.contains("not committed"),
-            "the row does not say why it refused:\n{screen}"
-        );
+        assert!(screen.contains("▍!✻ add-retry-logic"), "{screen}");
         let bar = screen
             .lines()
             .find(|line| line.starts_with("harness-launcher"))
@@ -1175,7 +1243,7 @@ F10 quits — nothing is killed"
 SPAWNS
 
 a-repository-with-a-v… ·
- · an-extremely-long-sp…
+ ·✻ an-extremely-long-s…
 
 
 F2 starts a draft
@@ -1256,28 +1324,28 @@ F10 quits — nothing is …"
 SPAWNS
 
 acme-api ●?··········
- ● task-03
- ? task-07
- · task-01
- · task-02
- · task-04
- · task-05
- · task-06
- · task-08
- · task-09
- · task-10
- · task-11
- · task-12
+ ●✻ task-03
+ ?✻ task-07
+ ·✻ task-01
+ ·✻ task-02
+ ·✻ task-04
+ ·✻ task-05
+ ·✻ task-06
+ ·✻ task-08
+ ·✻ task-09
+ ·✻ task-10
+ ·✻ task-11
+ ·✻ task-12
 
 dotfiles ●·······
- ● chore-02
- · chore-01
- · chore-03
- · chore-04
- · chore-05
- · chore-06
- · chore-07
- · chore-08
+ ●✻ chore-02
+ ·✻ chore-01
+ ·✻ chore-03
+ ·✻ chore-04
+ ·✻ chore-05
+ ·✻ chore-06
+ ·✻ chore-07
+ ·✻ chore-08
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -1287,6 +1355,103 @@ F10 quits — nothing is killed"
 
     /// Where a row's status mark sits: after the gutter the selection uses.
     const MARK: u16 = 1;
+
+    /// Where the glyph saying which harness a spawn runs sits: the column after
+    /// the mark, and the one before the space that already separates the name.
+    const HARNESS: u16 = MARK + 1;
+
+    /// The row the keyboard is on, found the way a reader finds it — by the
+    /// mark in the gutter.
+    fn selected_row(painted: &Buffer) -> u16 {
+        (0..painted.area.height)
+            .find(|row| painted[(0, *row)].symbol() == SELECTED)
+            .unwrap_or_else(|| panic!("nothing in the list is selected"))
+    }
+
+    /// The five, on a terminal big enough for them, with the keyboard on one.
+    fn with_the_keyboard_on(spawn: &str, retirements: &Retirements) -> Buffer {
+        painted_on(30, 14, &five(), retirements, &Cursor::on_spawn(spawn))
+    }
+
+    /// A spawn runs under a harness, and which one is a distinction that starts
+    /// mattering the moment there is more than one. It reads as part of the row
+    /// rather than as a thing of its own: the same colour as the mark before it
+    /// and the name after it.
+    #[test]
+    fn every_row_wears_the_glyph_of_what_it_runs_under() {
+        let painted = with_the_keyboard_on("add-retry-logic", &Retirements::default());
+
+        for row in [3, 4, 5] {
+            assert_eq!(
+                painted[(HARNESS, row)].symbol(),
+                crate::harness::GLYPH,
+                "row {row} does not say what it runs under"
+            );
+        }
+        // A working spawn nobody is standing on: mark, glyph and name are all
+        // the one way of reading.
+        assert_eq!(
+            painted[(HARNESS, 3)].style().fg,
+            painted[(MARK, 3)].style().fg
+        );
+    }
+
+    /// **The band is what says where the keyboard is.** A mark one character
+    /// wide in the gutter is a thing to hunt for in twenty rows, so the row is
+    /// painted instead — the width of the list rather than the width of the
+    /// name, or it would read as a highlight on a word.
+    ///
+    /// The gutter takes the band as well: its own cyan on a cyan band is the one
+    /// cell of the row that would disappear.
+    #[test]
+    fn the_selected_row_is_painted_black_on_a_band_the_width_of_the_list() {
+        let painted = with_the_keyboard_on("add-retry-logic", &Retirements::default());
+        let row = selected_row(&painted);
+
+        for column in 0..painted.area.width {
+            let cell = &painted[(column, row)];
+            assert_eq!(
+                cell.style().bg,
+                Some(Color::Cyan),
+                "column {column} of the row is not on the band: {cell:?}"
+            );
+            assert_eq!(
+                cell.style().fg,
+                Some(Color::Black),
+                "column {column} of the row is not black on it: {cell:?}"
+            );
+        }
+    }
+
+    /// The band follows the amber wherever it is, rather than listing the states
+    /// that have it: two of them here, an unknown spawn and a refused
+    /// retirement, and the rule is what is being checked rather than the count.
+    /// A spawn's status colour is otherwise not carried onto the band — the
+    /// marks tell every state apart without it, and an alarmed spawn's slot is
+    /// saying so in words at the same time.
+    #[test]
+    fn the_band_under_an_alarmed_spawn_is_amber_rather_than_cyan() {
+        let mut refused = being_retired("add-retry-logic", "removing the worktree");
+        refused.refused(
+            "add-retry-logic",
+            "there is work that is not committed".to_string(),
+        );
+
+        for (spawn, retirements) in [
+            ("spawn-form-choices", Retirements::default()),
+            ("add-retry-logic", refused),
+        ] {
+            let painted = with_the_keyboard_on(spawn, &retirements);
+            let row = selected_row(&painted);
+
+            assert_eq!(
+                painted[(0, row)].style().bg,
+                Some(AMBER),
+                "the band under {spawn} is not the colour the app admits things in"
+            );
+            assert_eq!(painted[(MARK, row)].style().fg, Some(Color::Black));
+        }
+    }
 
     #[test]
     fn a_status_is_a_shape_and_a_colour_at_once() {
@@ -1381,32 +1546,32 @@ F10 quits — nothing is killed"
 SPAWNS
 
 harness-launcher ●····
- ● prune-stale-symlinks
- · fix-worktree-cleanup
- · control-mode-backpressure
- · status-ladder-grace-period
- · rotate-the-deploy-keys
+ ●✻ prune-stale-symlinks
+ ·✻ fix-worktree-cleanup
+ ·✻ control-mode-backpressure
+ ·✻ status-ladder-grace-period
+ ·✻ rotate-the-deploy-keys
 
 acme-api ●····
- ● idempotency-keys
- · add-retry-logic
- · rate-limit-headers
- · terraform-state-locking
- · alert-on-disk-pressure
+ ●✻ idempotency-keys
+ ·✻ add-retry-logic
+ ·✻ rate-limit-headers
+ ·✻ terraform-state-locking
+ ·✻ alert-on-disk-pressure
 
 dotfiles ?····
- ? font-fallback-for-emoji
- · drop-legacy-auth
- · tidy-the-shell-prompt
- · cheaper-log-retention
- · pagination-cursors
+ ?✻ font-fallback-for-emoji
+ ·✻ drop-legacy-auth
+ ·✻ tidy-the-shell-prompt
+ ·✻ cheaper-log-retention
+ ·✻ pagination-cursors
 
 infra ●····
- ● neovim-lsp-config
- · spawn-form-choices
- · openapi-drift-check
- · ssh-agent-forwarding
- · blue-green-cutover
+ ●✻ neovim-lsp-config
+ ·✻ spawn-form-choices
+ ·✻ openapi-drift-check
+ ·✻ ssh-agent-forwarding
+ ·✻ blue-green-cutover
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -1449,12 +1614,8 @@ F10 quits — nothing is killed"
         let screen = drawn(30, 12, &entries, &snapshot, &Cursor::on_spawn("chore-08"));
 
         assert!(
-            screen.contains("▍· chore-08"),
+            screen.contains("▍·✻ chore-08"),
             "the selection moved somewhere the screen does not reach:\n{screen}"
-        );
-        assert!(
-            screen.contains("   spawn/chore-08"),
-            "the selected spawn's detail hangs off the bottom:\n{screen}"
         );
     }
 

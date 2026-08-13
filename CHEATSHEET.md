@@ -51,6 +51,9 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
 - Spawns — `·` working · `●` stopped · `?` the app cannot tell · `-` being retired
 - Drafts — `+` being written · `>` being made into a spawn
 - Either — `!` it stopped, or would not retire · `▍` the selected row
+- Every spawn — `✻` beside the mark, the harness it is running under
+- One line each, selected or not; the selected row is painted across the list,
+  amber instead of cyan when it is one the app is admitting something about
 
 ## Worth knowing
 
@@ -63,6 +66,7 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
   (`~/.local/share/...` when that is unset).
 - **A `?` spawn explains itself when you select it** — its pane, the process
   whose status would not resolve, and what the app could last tell — over the top
-  of its screen, which is still live underneath.
+  of its screen, which is still live underneath. A retirement writes there too:
+  what it is doing, and why it refused. Both at once puts the retirement last.
 - **A refusal never costs your typing.** A draft that could not be started keeps
   its text and its choices, says why, and `F5` tries it again.

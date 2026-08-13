@@ -56,7 +56,7 @@ use crate::draft::{self, Draft, Drafts, Edit};
 use crate::error::{Error, Result};
 use crate::keys::{self, Modes};
 use crate::list::{self, Cursor, Entry, Listing, Step};
-use crate::retirement::{self, Retirements};
+use crate::retirement::{self, Retirement, Retirements};
 use crate::scaffolding::{AMBER, DIM, HEADING, wrapped};
 use crate::screen::{Screen, Size};
 use crate::snapshot::{Snapshot, Unaccounted, Watched};
@@ -913,17 +913,15 @@ fn regions(area: Rect) -> (Rect, Rect, Rect) {
 
 /// Paint one frame.
 ///
-/// The snapshot is here for one thing beyond the list: a spawn the app cannot
-/// account for says so **in the slot**, which is where somebody who saw the mark
-/// on its row went to find out what is wrong.
+/// The snapshot and the retirements are here for one thing beyond the list: what
+/// the app has to say about a spawn in sentences is said **in the slot**, which
+/// is where somebody who saw the mark on its row went to find out what is wrong.
 pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
     let (list, separator, slot) = regions(frame.area());
-    // Asked of the listing rather than passed alongside it: the list and the
-    // slot are two halves of one frame and must be drawn out of one moment.
+    // The snapshot, and the retirement asked for below: both come off the
+    // listing rather than alongside it, because the list and the slot are two
+    // halves of one frame and must be drawn out of one moment.
     let latest = listing.snapshot();
-
-    frame.render_widget(listing, list);
-    frame.render_widget(Block::new().borders(Borders::LEFT), separator);
 
     // Where the terminal's own cursor goes, asked of whatever drew the slot.
     // Without it the app would have a screen that looks like a session, or a
@@ -932,12 +930,18 @@ pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
         InTheSlot::Session(spawn) => {
             let screen = spawn.screen();
             frame.render_widget(&*screen, slot);
-            if let Some(unaccounted) = latest
-                .of(&spawn.entry.spawn)
-                .and_then(|row| row.unaccounted.as_ref())
-            {
-                explain(frame, slot, unaccounted, &spawn.entry.spawn);
-            }
+            explain(
+                frame,
+                slot,
+                said_about(
+                    &spawn.entry.spawn,
+                    latest
+                        .of(&spawn.entry.spawn)
+                        .and_then(|row| row.unaccounted.as_ref()),
+                    listing.retirement(&spawn.entry.spawn),
+                    usize::from(slot.width),
+                ),
+            );
 
             screen.cursor()
         }
@@ -956,6 +960,13 @@ pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
         InTheSlot::Nothing => None,
     };
 
+    // Painted after the slot rather than before it, because rendering the
+    // listing consumes it and the arm above asks it about the retirement. The
+    // three regions are disjoint, so the order they are painted in is not
+    // something the screen can tell.
+    frame.render_widget(listing, list);
+    frame.render_widget(Block::new().borders(Borders::LEFT), separator);
+
     if let Some((column, row)) = caret
         && column < slot.width
         && row < slot.height
@@ -964,33 +975,72 @@ pub fn render(frame: &mut Frame, listing: Listing, showing: &InTheSlot) {
     }
 }
 
-/// Say why the app cannot account for the spawn in the slot, over the top of
-/// what that spawn drew.
+/// Everything the app has to say about the spawn in the slot, in the order it is
+/// read.
+///
+/// Two sentences can apply at once — the app cannot account for a spawn *and*
+/// would not retire it — and **the retirement goes last**: it is the newest
+/// thing to have happened to the spawn, and a refused retirement is what
+/// somebody who pressed the key came back to read.
+///
+/// A retirement under way is not written in amber. Amber is the colour the app
+/// admits things in, and a retirement doing what it was asked is not an
+/// admission; a refused one is, and takes it.
+fn said_about(
+    name: &str,
+    unaccounted: Option<&Unaccounted>,
+    retiring: Option<&Retirement>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(unaccounted) = unaccounted {
+        for (at, sentence) in unaccounted.explained(name).iter().enumerate() {
+            let how = if at == 0 { HEADING } else { DIM };
+            lines.extend(
+                wrapped(sentence, width)
+                    .into_iter()
+                    .map(|line| Line::styled(line, how.fg(AMBER))),
+            );
+        }
+    }
+
+    if let Some(retiring) = retiring {
+        let how = if retiring.refused() {
+            HEADING.fg(AMBER)
+        } else {
+            HEADING
+        };
+        lines.extend(
+            wrapped(retiring.said(), width)
+                .into_iter()
+                .map(|line| Line::styled(line, how)),
+        );
+    }
+
+    lines
+}
+
+/// Say it over the top of what the spawn in the slot drew.
 ///
 /// **Over the top rather than instead of.** An unaccountable spawn is very often
 /// still running — the whole point of the status is that it is the *app's*
 /// instrumentation that failed, not the agent — so taking its screen away would
-/// hide a live session to complain about the app's own eyesight. The top is what
-/// it covers, because the bottom of a harness's screen is where it asks you
-/// things.
+/// hide a live session to complain about the app's own eyesight. A spawn being
+/// retired is being stopped, so its screen is worth even less. The top is what
+/// the band covers, because the bottom of a harness's screen is where it asks
+/// you things.
 ///
-/// It costs the rows it takes, and gives them back the moment the app can
-/// account for the spawn again.
-fn explain(frame: &mut Frame, slot: Rect, unaccounted: &Unaccounted, name: &str) {
-    let said = unaccounted.explained(name);
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (at, sentence) in said.iter().enumerate() {
-        let how = if at == 0 { HEADING } else { DIM };
-        lines.extend(
-            wrapped(sentence, usize::from(slot.width))
-                .into_iter()
-                .map(|line| Line::styled(line, how.fg(AMBER))),
-        );
-    }
-
+/// It costs the rows it takes, and gives them back the moment the app has
+/// nothing left to say — which is what makes this the app's own writing rather
+/// than a part of the layout.
+fn explain(frame: &mut Frame, slot: Rect, lines: Vec<Line<'static>>) {
     let Ok(rows) = u16::try_from(lines.len()) else {
         return;
     };
+    if rows == 0 {
+        return;
+    }
     let band = Rect {
         height: rows.min(slot.height),
         ..slot
@@ -1141,13 +1191,19 @@ mod tests {
         );
     }
 
+    /// **Neither the branch nor the worktree is on the running screen.** Both
+    /// are the spawn's own name under something fixed — a branch prefix, one
+    /// worktree root — so drawing them costs lines to restate the name already
+    /// there. What the screen keeps is that name, which is what somebody going
+    /// to find the work goes back with.
     #[test]
-    fn the_list_says_what_the_app_created() {
+    fn the_running_screen_says_neither_the_branch_nor_the_worktree() {
         let screen = rendered(160, 12);
 
-        assert!(screen.contains("spawn/add-retry-logic-a7f3"), "{screen}");
+        assert!(screen.contains("add-retry-logic-a7f3"), "{screen}");
+        assert!(!screen.contains("spawn/add-retry-logic-a7f3"), "{screen}");
         assert!(
-            screen.contains("/data/harness-launcher/worktrees"),
+            !screen.contains("/data/harness-launcher/worktrees"),
             "{screen}"
         );
     }
@@ -1303,6 +1359,20 @@ mod tests {
         assert_eq!(cursor_after(TERMINAL, &InTheSlot::Session(&spawn)), None);
     }
 
+    /// What is in **the slot**, whatever the list beside it says.
+    ///
+    /// The other half of [`row`], and there for the same reason: the list and
+    /// the slot can be about the same spawn at once, so a screen read whole
+    /// cannot say which of them something was drawn in.
+    fn in_the_slot_of(screen: &str) -> String {
+        screen
+            .lines()
+            .filter_map(|line| line.split_once('│'))
+            .map(|(_, slot)| slot)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The row the spawn is on in **the list**, whatever else moved around it.
     ///
     /// The list half of the line and not the whole of it: the slot beside it can
@@ -1403,6 +1473,129 @@ mod tests {
         );
     }
 
+    /// The same slot, with the spawn in it being retired.
+    fn while_retiring(width: u16, height: u16, retirements: &Retirements, slot: &str) -> String {
+        let terminal = Size {
+            columns: width,
+            rows: height,
+        };
+        let entries = entries();
+        let spawn = spawn_of(
+            &entries[0].repository,
+            &entries[0].spawn,
+            "%1",
+            slot_size(terminal),
+            slot,
+        );
+
+        painted(
+            terminal,
+            &[],
+            &entries,
+            &saying(Status::Working, None),
+            retirements,
+            &Cursor::on_spawn(&entries[0].spawn),
+            &InTheSlot::Session(&spawn),
+        )
+    }
+
+    /// A retirement of the one spawn there is, at whatever step it has reached.
+    fn being_retired(step: &str) -> Retirements {
+        let mut retirements = Retirements::default();
+        retirements.asked_for(&entries()[0].spawn);
+        retirements.doing(&entries()[0].spawn, step.to_string());
+
+        retirements
+    }
+
+    /// **A retirement writes in the slot for the reason the explanation does.**
+    /// It is the app writing about itself rather than the agent; and a spawn
+    /// somebody has said they are done with is being stopped, so drawing over
+    /// its screen costs nothing anybody was going to read. The row keeps the
+    /// mark, which is what a spawn being retired says from across the list.
+    #[test]
+    fn the_slot_says_what_a_retirement_is_doing() {
+        let screen = while_retiring(
+            180,
+            20,
+            &being_retired("stopping the session"),
+            "the spawn is still drawing",
+        );
+
+        assert!(
+            in_the_slot_of(&screen).contains("stopping the session"),
+            "the slot does not say what is happening to the spawn:\n{screen}"
+        );
+    }
+
+    /// A refusal is the one thing here somebody has to act on, and it is a
+    /// sentence naming the work that stopped it — which is why it goes where
+    /// there is room for a sentence.
+    #[test]
+    fn the_slot_says_why_a_retirement_was_refused() {
+        let mut retirements = being_retired("removing the worktree");
+        retirements.refused(
+            &entries()[0].spawn,
+            "/w/add-retry-logic-a7f3 has work in it that is not committed".to_string(),
+        );
+
+        let screen = while_retiring(180, 20, &retirements, "the spawn is still drawing");
+
+        assert!(
+            in_the_slot_of(&screen).contains("not committed"),
+            "the slot does not say why the retirement stopped:\n{screen}"
+        );
+    }
+
+    /// **Both, and the retirement last.** A spawn can be one the app cannot read
+    /// *and* one that would not retire, and the retirement is the newer of the
+    /// two — as well as the one somebody pressing the key came back to read.
+    #[test]
+    fn a_spawn_that_is_unaccounted_for_and_would_not_retire_says_both() {
+        let mut retirements = being_retired("removing the worktree");
+        retirements.refused(
+            &entries()[0].spawn,
+            "there is work in it that is not committed".to_string(),
+        );
+        let terminal = Size {
+            columns: 180,
+            rows: 20,
+        };
+        let entries = entries();
+        let spawn = spawn_of(
+            &entries[0].repository,
+            &entries[0].spawn,
+            "%1",
+            slot_size(terminal),
+            "",
+        );
+
+        let screen = painted(
+            terminal,
+            &[],
+            &entries,
+            &saying(
+                Status::Unknown,
+                Some("its session record carries no status"),
+            ),
+            &retirements,
+            &Cursor::on_spawn(&entries[0].spawn),
+            &InTheSlot::Session(&spawn),
+        );
+
+        let slot = in_the_slot_of(&screen);
+        let explanation = slot
+            .find("carries no status")
+            .unwrap_or_else(|| panic!("the slot does not explain the spawn:\n{screen}"));
+        let refusal = slot
+            .find("not committed")
+            .unwrap_or_else(|| panic!("the slot does not say why it would not retire:\n{screen}"));
+        assert!(
+            explanation < refusal,
+            "the retirement is not the last thing said:\n{screen}"
+        );
+    }
+
     /// And a spawn the app *can* account for gets the whole slot: the band is
     /// the app admitting something, so a spawn it has nothing to admit about
     /// must not carry one.
@@ -1419,15 +1612,22 @@ mod tests {
         assert!(screen.contains("the spawn is talking"), "{screen}");
     }
 
+    /// **A spawn the app cannot account for is still one row of the list.** What
+    /// it costs is a band in the slot, so a list of twenty is the same list of
+    /// twenty whether or not the app can read one of them.
     #[test]
-    fn a_reason_takes_a_line_only_when_there_is_something_to_explain() {
+    fn a_row_is_one_line_whether_or_not_there_is_anything_to_explain() {
         let explained = drawn(180, 14, &saying(Status::Unknown, Some("no record")), "");
         let plain = drawn(180, 14, &saying(Status::Working, None), "");
 
         assert_eq!(
             written(&explained),
-            written(&plain) + 1,
-            "an explained row and an unexplained one are the same height:\n{explained}"
+            written(&plain),
+            "explaining a spawn cost the list a line:\n{explained}"
+        );
+        assert!(
+            explained.contains("no record"),
+            "the sentence is nowhere on the screen at all:\n{explained}"
         );
     }
 
@@ -1916,9 +2116,20 @@ mod tests {
         let first = with_drafts(&spawns, &drafts, &Cursor::on_draft(drafts.all()[0].id()));
         let second = with_drafts(&spawns, &drafts, &Cursor::on_draft(drafts.all()[1].id()));
 
-        assert!(first.contains("  the first draft"), "{first}");
-        assert!(!first.contains("  the second draft"), "{first}");
-        assert!(second.contains("  the second draft"), "{second}");
+        // The slot alone: both drafts have a row in the list beside it, and it
+        // is the form that has to be holding the right one's text.
+        assert!(
+            in_the_slot_of(&first).contains("the first draft"),
+            "{first}"
+        );
+        assert!(
+            !in_the_slot_of(&first).contains("the second draft"),
+            "{first}"
+        );
+        assert!(
+            in_the_slot_of(&second).contains("the second draft"),
+            "{second}"
+        );
     }
 
     /// The whole screen, on a terminal tall enough for everything a form has to
@@ -2314,7 +2525,7 @@ mod tests {
         );
         let screen = on_screen(&held);
         assert!(
-            screen.contains("▍- add-retry-logic-a7f3"),
+            screen.contains("▍-✻ add-retry-logic-a7f3"),
             "the row does not say it is being retired:\n{screen}"
         );
     }

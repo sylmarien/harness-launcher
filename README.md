@@ -80,8 +80,12 @@ repository header carrying a compact bar of its spawns' statuses so a project
 reads without reading its rows. Within a repository the order is
 attention-first: stopped, then unknown, then working. Status is carried by an
 icon and a colour together, so the list needs no legend and survives a
-colour-blind reader. The selected spawn says what the app made for it — its
-branch, its worktree, and the reason if the app cannot tell what it is doing.
+colour-blind reader. **Every entry is one line, the selected one included** —
+which is what lets fifteen or twenty of them be on screen at once — and each
+carries a `✻` saying which harness it runs. The row the keyboard is on is
+painted across the width of the list rather than only marked in the gutter, and
+anything the app has to say about that spawn in a sentence is said in the slot
+beside it, over the top of the spawn's own screen.
 
 **`F9` retires the spawn the list is on**, which is the only thing that releases
 what the app made — never inferred from an agent falling silent. The order is
@@ -99,8 +103,9 @@ without a word. **Anything uncommitted and retiring refuses**, with no
 confirmation flow: clean it up yourself and press `F9` again. The refusal lands
 after the session has been stopped, which is the cost of checking a worktree
 nothing is writing to, and the row says so — `-` while it is being retired, `!`
-if it would not, with the reason under it. **Retiring removes the worktree and
-leaves the branch**, which is where the committed work is.
+if it would not, with what it is doing and why it refused in the slot beside it.
+**Retiring removes the worktree and leaves the branch**, which is where the
+committed work is.
 
 tmux is here, but you never see it: a **detached** session on a socket of the
 app's own, one invisible window per spawn, drawing nothing. It owns the

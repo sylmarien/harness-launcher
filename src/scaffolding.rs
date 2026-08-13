@@ -31,9 +31,39 @@ pub const HEADING: Style = Style::new().add_modifier(Modifier::BOLD);
 /// selected row, and the lines saying what the keyboard does.
 pub const DIM: Style = Style::new().add_modifier(Modifier::DIM);
 
-/// How the mark in the gutter reads. A colour of its own, because it says
-/// something about the app rather than about a spawn.
-pub const SELECTION: Style = Style::new().fg(Color::Cyan);
+/// The colour the app says *the keyboard is on this one* in. A colour of its
+/// own, because it says something about the app rather than about a spawn.
+///
+/// Written once and read two ways — as the mark in a form's gutter, and as the
+/// band under a row of the list — so the two can never come to disagree about
+/// what being selected looks like.
+const SELECTION_COLOUR: Color = Color::Cyan;
+
+/// How the mark in the gutter reads where the row itself is not painted.
+pub const SELECTION: Style = Style::new().fg(SELECTION_COLOUR);
+
+/// How a row the keyboard is on reads: black on a band, which the row is then
+/// padded out to the full width of to make it a band rather than a highlight.
+///
+/// **The one place the app names both colours**, and it is the one place it can:
+/// everywhere else it puts a colour on the user's own background and has to
+/// leave that background alone, so black would be a guess about a theme it
+/// cannot see. Here the background is the app's own, so what reads on top of it
+/// is arithmetic rather than a guess.
+///
+/// `alarmed` is the row being one the app is admitting something about, and
+/// [`AMBER`] is the whole of the rule: it is the colour reserved for the app
+/// admitting things and used for nothing else, so **whatever the caller has
+/// already drawn in amber is what is being admitted**. The band takes amber
+/// rather than the selection's colour, so the admission survives the row being
+/// selected. Listing the states that qualify would be a second answer to a
+/// settled question, and the two would come apart the first time a state was
+/// added to one of them.
+pub fn band(alarmed: bool) -> Style {
+    Style::new()
+        .bg(if alarmed { AMBER } else { SELECTION_COLOUR })
+        .fg(Color::Black)
+}
 
 /// The colour reserved for the app admitting something: that it cannot tell
 /// what a spawn is doing, or that it could not do what it was asked.
@@ -47,8 +77,13 @@ pub const AMBER: Color = Color::Yellow;
 ///
 /// A space rather than nothing, so what is beside it does not shift sideways as
 /// the selection arrives and leaves.
-pub fn gutter(on_it: bool) -> Span<'static> {
-    Span::styled(if on_it { SELECTED } else { " " }, SELECTION)
+///
+/// **How it reads is the row's rather than the gutter's**, because a row can be
+/// painted: a mark keeping its own cyan on a cyan [`band`] would be the one cell
+/// of the row that disappeared. A column that draws no band passes [`SELECTION`]
+/// and gets what this always did.
+pub fn gutter(on_it: bool, how_it_reads: Style) -> Span<'static> {
+    Span::styled(if on_it { SELECTED } else { " " }, how_it_reads)
 }
 
 /// `text`, cut to fit, ending in the mark that says it was cut.
@@ -84,9 +119,10 @@ pub fn elided(text: &str, cells: usize) -> String {
 /// a selection that moves is a selection you can see.
 ///
 /// `selected` is the first and last line the selected thing occupies, which is
-/// more than one line for a spawn showing its detail and for a form control with
-/// a paragraph in it. Where even the whole of it will not fit, its first line
-/// wins.
+/// more than one line for a form control with a paragraph in it. A row of the
+/// list is one line and gives the same number twice; the pair is still what this
+/// takes, because the two columns share it. Where even the whole of a selection
+/// will not fit, its first line wins.
 pub fn scroll_offset(selected: Option<(usize, usize)>, height: usize) -> u16 {
     let Some((first, last)) = selected else {
         return 0;
@@ -100,12 +136,12 @@ pub fn scroll_offset(selected: Option<(usize, usize)>, height: usize) -> u16 {
 
 /// `text`, broken across lines of at most `cells`, on the spaces in it.
 ///
-/// For the two things the app writes that are prose rather than names: the
-/// sentence saying why a spawn is `unknown`, and the one saying why a draft
-/// could not be started. Both are sentences the app did not write itself — they
-/// carry git's words, or the harness's — and a sentence cut at twenty-seven
-/// columns says nothing. A word too long for a line of its own is cut, which is
-/// the only way it ends.
+/// For the things the app writes that are prose rather than names: the sentence
+/// saying why a spawn is `unknown`, the one a retirement carries, and the one
+/// saying why a draft could not be started. None of them is a sentence the app
+/// wrote itself — they carry git's words, or the harness's — and a sentence cut
+/// at twenty-seven columns says nothing. A word too long for a line of its own
+/// is cut, which is the only way it ends.
 ///
 /// A column with no room at all gets no lines rather than a blank one per word:
 /// they would show as nothing and still push everything under them down.
@@ -324,9 +360,18 @@ mod tests {
     #[test]
     fn the_gutter_is_the_same_width_whether_the_keyboard_is_there_or_not() {
         assert_eq!(
-            gutter(true).content.chars().count(),
-            gutter(false).content.chars().count()
+            gutter(true, SELECTION).content.chars().count(),
+            gutter(false, SELECTION).content.chars().count()
         );
-        assert_eq!(gutter(true).content, SELECTED);
+        assert_eq!(gutter(true, SELECTION).content, SELECTED);
+    }
+
+    /// The two things a band has to be: a background the row is painted with,
+    /// and the admission surviving the row being selected.
+    #[test]
+    fn a_band_is_a_background_and_it_is_amber_when_the_app_is_admitting_something() {
+        assert_eq!(band(false).bg, Some(SELECTION_COLOUR));
+        assert_eq!(band(true).bg, Some(AMBER));
+        assert_eq!(band(true).fg, band(false).fg);
     }
 }

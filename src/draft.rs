@@ -902,7 +902,7 @@ enum Control {
 /// A control's heading, with the mark in the gutter when the keyboard is in it.
 fn heading(on_it: bool, title: &str) -> Line<'static> {
     Line::from(vec![
-        scaffolding::gutter(on_it),
+        scaffolding::gutter(on_it, scaffolding::SELECTION),
         Span::styled(title.to_string(), scaffolding::HEADING),
     ])
 }
