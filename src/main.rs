@@ -226,8 +226,9 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
 /// covers it, so it is read on the way out rather than on the way in — the
 /// original screen comes back when the app leaves, with this still on it and the
 /// leaving report printed under it. *Whether* it should be held back until it
-/// can be read on the way in is deliberately left open by the design record
-/// (§5.3, "the reports"); that both reports land on the shell is not, and the
+/// can be read on the way in is deliberately left open —
+/// `docs/developers/components/starting-and-leaving.md` records the question;
+/// that both reports land on the shell is not, and the
 /// shell is where every other thing the app says before it takes the screen
 /// already lands.
 fn say_what_was_found(tmux: &Server, worktrees: &Path) -> Result<()> {

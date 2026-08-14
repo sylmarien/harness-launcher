@@ -114,8 +114,9 @@ pub fn elided(text: &str, cells: usize) -> String {
 /// possibly can, and nothing moves under the eye that did not have to.
 ///
 /// This is not scrolling. Reaching something the selection is not on, on a
-/// column longer than the screen, is the open question the design records (§5.3)
-/// and the scale pass owns. What is settled here is narrower and was asked for:
+/// column longer than the screen, is the open question
+/// `docs/developers/components/the-screen.md` records and the scale pass owns.
+/// What is settled here is narrower and was asked for:
 /// a selection that moves is a selection you can see.
 ///
 /// `selected` is the first and last line the selected thing occupies, which is

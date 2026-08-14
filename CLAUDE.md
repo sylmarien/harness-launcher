@@ -12,7 +12,7 @@ The five canonical triage roles are used as-is: `needs-triage`, `needs-info`, `r
 
 ### Domain docs
 
-Single-context — when domain docs are written, they go to one `CONTEXT.md` and `docs/adr/` at the repo root. Neither exists yet; `/domain-modeling` creates them lazily. See `docs/agents/domain.md`.
+Documentation is split by audience: `docs/users/` for using the software, `docs/developers/` for how it is built — the map is `docs/developers/README.md`, the vocabulary is `docs/developers/glossary.md`. `docs/tranches/` and `docs/evidence/` are frozen records, never updated to match the code. There are no decision records (no `CONTEXT.md`, no `docs/adr/`) — why lives in issues and PRs. See `docs/agents/domain.md`.
 
 ## Workflow
 
