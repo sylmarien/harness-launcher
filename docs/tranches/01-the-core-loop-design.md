@@ -1,7 +1,11 @@
 # Tranche 1 — The core loop: design
 
-**Status: settled.** Every design question for tranche 1 is closed. This document is
-the complete record of what was decided and why.
+**Status: frozen.** Tranche 1 has shipped, every design question in it is closed, and
+this document is the record of what was decided and why — as it stood when the tranche
+closed. It is history, not living documentation: nothing here is updated to track the
+code, and no dated notes are appended when later decisions land — those live in the
+issues and pull requests that take them. What the software does *today* is documented
+in [`docs/developers/`](../developers/README.md).
 
 It is written to stand alone. The decisions were reached across a long series of
 conversations and recorded as GitHub issues; this compiles them so the knowledge is
@@ -15,7 +19,7 @@ can be reused to build this in something other than the language first chosen.
 
 **Related documents.** [`docs/product-vision.md`](../product-vision.md) is the
 unbounded wishlist — what the tool should do when it is *done*, across all tranches.
-[`docs/tranches/01-the-core-loop.md`](../tranches/01-the-core-loop.md) is the frozen
+[`docs/tranches/01-the-core-loop.md`](01-the-core-loop.md) is the frozen
 scope of this tranche — what is in and what is out. **This document is the design**:
 how the scope is met, and why each choice beat its alternatives.
 
