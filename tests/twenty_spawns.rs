@@ -1,44 +1,17 @@
-//! Twenty spawns at once, driven end to end and measured.
-//!
-//! The tranche's headline claim is a number — comfortably past the four or five
-//! concurrent sessions a person handles by hand — and a number is a thing to
-//! observe rather than to assert. So this is not a test of a behaviour: it is a
-//! rig that starts the real app on a real terminal, gives it twenty real
-//! worktrees over four real repositories, and writes down what happened. What it
-//! asserts is only the handful of things that would make the numbers meaningless
-//! if they were not true.
-//!
-//! **It is `#[ignore]`d**, because it takes a minute, wants four cores to itself
-//! and prints a report nobody reads on the way past. Run it by hand:
+//! Twenty spawns at once: a measurement rig, not a behaviour test. The numbers
+//! it produced live in `docs/evidence/scale-at-twenty.md`. `#[ignore]`d — run
+//! it by hand:
 //!
 //! ```text
 //! cargo test --release --test twenty_spawns -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! What it observed on the machine it was run on is written down in
-//! `docs/evidence/scale-at-twenty.md`, which is where the numbers belong: a
-//! measurement is about a machine, and this file is only how it was taken.
-//!
-//! **Nothing here starts a real harness.** Twenty Claude Code sessions cost
-//! tokens and need credentials, which the design rules out of every test. What
-//! runs in the panes is a stand-in that does the two things this measurement is
-//! about: it draws a whole screen on the alternate buffer several times a
-//! second, and it keeps a session record where the real harness keeps one. Where
-//! that stand-in is unlike the real thing is recorded in the evidence document
-//! rather than papered over.
-//!
-//! **Everything is private to the run.** Its own `HOME`, its own worktree root,
-//! its own harness configuration directory, and — through `TMUX_TMPDIR` — its
-//! own tmux socket directory, so the server the app talks to is this rig's and
-//! not the one the person running it is sitting in front of.
-//!
-//! **This file names the harness, and that is not the invariant breaking.** The
-//! rule is that nothing in `src/` outside the harness module may mention Claude
-//! Code, and the grep that checks it is scoped there for a reason: this rig is
-//! not part of the app, it is the *world the app runs in*. A world that is going
-//! to be asked for a harness has to have one in it, under the name the app will
-//! reach for — so the stand-in is called `claude` and the models it answers to
-//! are the harness's own. Nothing here is compiled into the program.
+//! No real harness runs: the panes hold a stand-in doing the two things being
+//! measured — repainting a whole screen on the alternate buffer and keeping a
+//! session record where the harness keeps one. Everything (HOME, config,
+//! worktrees, the tmux socket) is private to the run. This file may name the
+//! harness: the no-Claude-Code rule covers `src/`, and this rig is the world
+//! the app runs in, not part of it.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -52,33 +25,27 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use tempfile::TempDir;
 
-/// The terminal the app is given, in columns and rows.
-///
-/// A large one, because the list is a third of it and the point is what twenty
-/// rows look like beside a session.
+/// The terminal the app is given; large, so twenty rows sit beside a session.
 const COLUMNS: u16 = 200;
 const ROWS: u16 = 50;
 
 /// How long anything waited for is waited for.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// How often the supervisor looks, which is what a tick's cost is measured
-/// against. The app's own number, written again here because a test cannot see
-/// it: this file drives the binary rather than linking to it.
+/// The app's own supervisor interval, repeated here because this file drives
+/// the binary rather than linking to it.
 const TICK: Duration = Duration::from_millis(200);
 
-/// How long the app gives a spawn before it will call it unaccounted for, and a
-/// little more — so a screen taken after this has all three statuses on it.
+/// The app's unaccounted-for grace period plus a little, so a screen taken
+/// after this has all three statuses on it.
 const GRACE: Duration = Duration::from_secs(12);
 
-/// The repositories the spawns are spread over. Several, because "spawns on
-/// different repositories" is what the tranche promises and a single repository
-/// would measure something easier.
+/// Several repositories, because "spawns on different repositories" is what
+/// the tranche promises.
 const REPOSITORIES: [&str; 4] = ["harness-launcher", "acme-api", "dotfiles", "infra"];
 
-/// Twenty pieces of work, five per repository, written the way somebody would
-/// write them — the list's readability is one of the things being looked at, and
-/// `task-07` would flatter it.
+/// Twenty pieces of work, five per repository, named the way a person would —
+/// the list's readability is one of the things being looked at.
 const WORK: [&str; 20] = [
     "fix worktree cleanup",
     "add retry logic",
@@ -102,22 +69,16 @@ const WORK: [&str; 20] = [
     "blue green cutover",
 ];
 
-/// The spawns whose stand-in reports itself stopped, and the one whose stand-in
-/// writes no record at all — so the list has all three statuses on it at once.
-///
-/// Carried by the model the spawn is started with rather than by its
-/// description, so nothing about the arrangement leaks into the names the list
-/// shows.
+/// The spawns that report themselves stopped, and the one that writes no
+/// record — so the list has all three statuses on it; carried by the model
+/// rather than the description.
 const STOPPED: [usize; 3] = [2, 9, 16];
 const SILENT: usize = 13;
 
-// ---------------------------------------------------------------------------
-// The rig
-// ---------------------------------------------------------------------------
+// --- The rig ---
 
 /// Everywhere the run keeps something, and everything it made.
 struct Rig {
-    /// Everything below is under here, and goes with it.
     root: TempDir,
 }
 
@@ -181,10 +142,8 @@ impl Rig {
         ]
     }
 
-    /// Ask the rig's own tmux server something.
-    ///
-    /// The real `tmux`, addressed with the rig's socket directory, so it is the
-    /// app's server that answers and never the user's.
+    /// Ask the rig's own tmux server something — via the rig's socket
+    /// directory, so it is never the user's server that answers.
     fn tmux(&self, arguments: &[&str]) -> String {
         let mut command = Command::new("tmux");
         command.args(["-L", "harness-launcher"]).args(arguments);
@@ -200,26 +159,17 @@ impl Rig {
 }
 
 impl Drop for Rig {
-    /// Quitting the app kills nothing, which is the design — so the rig is what
-    /// stops twenty stand-ins that would otherwise outlive the test run.
+    /// Quitting the app kills nothing, so the rig is what stops the stand-ins.
     fn drop(&mut self) {
         self.tmux(&["kill-server"]);
     }
 }
 
-/// A stand-in for the harness.
-///
-/// It is not Claude Code and does not pretend to be. What it has in common with
-/// it is the two things the app touches: it draws a whole screen on the
-/// alternate buffer several times a second, and it writes a session record where
-/// the harness writes one, keyed by the process id tmux reports for its pane.
-///
-/// Which of the three statuses it reports is carried by the model it was started
-/// with: `haiku` reports itself stopped, `sonnet` writes no record at all — so
-/// the app cannot account for it — and everything else reports itself busy.
-///
-/// The record it writes is `__RECORD__`, filled in by [`stand_in`] from the
-/// capture rather than written out here.
+/// A stand-in for the harness, doing its two observable jobs: it repaints a
+/// whole screen on the alternate buffer several times a second, and it writes
+/// a session record keyed by its pane's pid. The model chooses its status:
+/// `haiku` stopped, `sonnet` no record at all, anything else busy.
+/// `__RECORD__` is filled in by [`stand_in`].
 const STAND_IN: &str = r#"#!/bin/bash
 model=""; name=""; work=""
 while [ "$#" -gt 0 ]; do
@@ -273,21 +223,9 @@ done
 /// The captured session record — see `captured/README.md`.
 const RECORD: &str = include_str!("../captured/session-record.json");
 
-/// The stand-in, with the record it writes filled in from the capture.
-///
-/// **The capture plus one field, not a record written from memory.**
-/// `captured/README.md` is explicit about why: a format remembered wrongly makes
-/// a parser that passes its tests and fails in front of a user, and this rig's
-/// whole output is a claim about the app reading real records. The app's own
-/// tests depart from this capture in exactly one place — the `status` field the
-/// captured machine does not write — and so does this, taking the other twelve
-/// fields from the recording rather than inventing a two-field object.
-///
-/// It cannot call `harness::recorded`, which is where that one departure lives
-/// for the unit tests: this is an integration test against a binary crate, and
-/// there is no library to reach into. So it makes the same two substitutions
-/// here, and they are the same two: a `status` at the front, and the pid, which
-/// has to be the stand-in's own because that is what the app keys a record by.
+/// The stand-in's record, filled in from the capture rather than written from
+/// memory (see `captured/README.md`), with the same two substitutions the
+/// app's unit tests make: a `status` field and the stand-in's own pid.
 fn stand_in() -> String {
     let rest = RECORD
         .trim()
@@ -298,16 +236,10 @@ fn stand_in() -> String {
     STAND_IN.replace("__RECORD__", &record)
 }
 
-/// `git`, with one worktree made slowly on purpose.
-///
-/// The app puts worktree creation on a thread of its own precisely because it
-/// takes seconds; a `git` that always answers at once would leave that claim
-/// untested. Only the one worktree whose name says so is slowed — everything
-/// else is the real `git`, at its own speed.
-///
-/// It finds the real one by dropping the first entry of `PATH`, which is this
-/// rig's own directory and is always put there first — so nothing here has to
-/// know where `git` is installed.
+/// `git`, with one worktree made slowly on purpose: worktree creation is on a
+/// thread of its own precisely because it takes seconds, and an instant `git`
+/// would leave that untested. The real `git` is found by dropping `PATH`'s
+/// first entry, which is always the rig's own bin.
 const SLOW_GIT: &str = r#"#!/bin/bash
 for argument in "$@"; do
   case "$argument" in
@@ -322,8 +254,8 @@ fn write_program(path: &Path, contents: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Run `git` for the rig's own setting-up, which is not the app's `git` and
-/// never goes through the slow one: this process's `PATH` has no rig on it.
+/// `git` for the rig's own setup; this process's `PATH` has no rig on it, so
+/// it never goes through the slow one.
 fn git(arguments: &[&str]) {
     let outcome = Command::new("git")
         .args(arguments)
@@ -344,18 +276,11 @@ fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
-// ---------------------------------------------------------------------------
-// The app, on a terminal of the rig's own
-// ---------------------------------------------------------------------------
+// --- The app, on a terminal of the rig's own ---
 
-/// The app's terminal, kept up to date as it draws.
-///
-/// **A live emulator rather than a pile of bytes**, and the reason is the one
-/// thing that would otherwise make every measurement here wrong: the app only
-/// writes the cells that *changed*, so the stream carries fragments of words and
-/// nothing that could be searched for. What a person is looking at is the screen
-/// those fragments add up to, which is what this holds — put together by the same
-/// emulator the app uses on its own children.
+/// The app's terminal, held as a live emulator rather than a pile of bytes:
+/// the app writes only the cells that changed, so the raw stream carries
+/// fragments nothing could be searched for.
 struct Terminal {
     /// What is on the screen now.
     parser: vt100::Parser,
@@ -387,13 +312,8 @@ struct App {
 }
 
 impl Drop for App {
-    /// **Stopped when the rig is done with it**, which is the one thing the app
-    /// itself will not do: quitting kills nothing, and a measurement that
-    /// stopped half way would otherwise leave a screenful of spawns running for
-    /// the next one to share the machine with.
-    ///
-    /// The app as well as whatever was started to run it, because under the
-    /// tracer they are two processes and killing the tracer leaves the app.
+    /// Killed by the rig, since quitting the app kills nothing. Both the app
+    /// and the tracer, which under `strace` are two processes.
     fn drop(&mut self) {
         let _ = Command::new("kill")
             .args(["-9", &self.pid.to_string()])
@@ -404,12 +324,9 @@ impl Drop for App {
 }
 
 impl App {
-    /// Start it, with everything it is to spawn on the command line.
-    ///
-    /// `under` is a file for `strace` to write to, for the run that counts what
-    /// a tick costs in system calls. The other run has none, because tracing
-    /// every file a program touches is not free and the timings would be about
-    /// the tracer.
+    /// Start it, with everything it is to spawn on the command line. `under`
+    /// is a file for `strace` to write to, used only by the tick-cost run
+    /// because tracing is not free.
     fn start(rig: &Rig, arguments: &[String], under: Option<&Path>) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
@@ -447,8 +364,8 @@ impl App {
 
         let child = pty.slave.spawn_command(command).unwrap();
         drop(pty.slave);
-        // Under the tracer the app is the tracer's child, and it is the app's
-        // own process every measurement here is about.
+        // Under the tracer the app is the tracer's child, and the app's own
+        // process is the one measured.
         let pid = match under {
             None => child.process_id().unwrap(),
             Some(_) => traced_by(child.process_id().unwrap()),
@@ -487,10 +404,8 @@ impl App {
         self.terminal.lock().unwrap().written
     }
 
-    /// Wait for the screen to say something, and say when it did.
-    ///
-    /// Looked at every millisecond, so what comes back is when the app had
-    /// finished drawing it to within about that.
+    /// Wait for the screen to say something, and return when it did (polled
+    /// every millisecond).
     fn wait_for(&mut self, wanted: &str) -> Instant {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -507,12 +422,8 @@ impl App {
         }
     }
 
-    /// Whether it is still there, for a complaint to say so.
-    ///
-    /// **A screen that has stopped changing is two different faults**: an app
-    /// that is stuck, and an app that is not there any more. Every complaint
-    /// here says which, because the first is a bug and the second is an app that
-    /// refused and said why.
+    /// A stuck app and a dead app are different faults; every complaint says
+    /// which.
     fn still_running(&mut self) -> String {
         match self.child.try_wait() {
             Ok(Some(status)) => format!(" — and the app has stopped: {status:?}"),
@@ -529,11 +440,8 @@ impl App {
         Instant::now()
     }
 
-    /// Which spawn the slot is showing, read off the screen.
-    ///
-    /// Each stand-in writes its own name between guillemets at the top of its
-    /// screen, and nothing else on the screen does — so this is the one thing
-    /// that says which session is in front of the user.
+    /// Which spawn the slot is showing: each stand-in writes its name between
+    /// guillemets, and nothing else on the screen does.
     fn showing(&self) -> Option<String> {
         let screen = self.screen();
         let name = screen.split("<<").nth(1)?.split(">>").next()?;
@@ -541,15 +449,10 @@ impl App {
         Some(name.to_string())
     }
 
-    /// Move the selection, and time how long until the slot is showing another
-    /// spawn.
-    ///
-    /// **Which spawn it lands on is deliberately not predicted.** The list
-    /// re-sorts as statuses arrive, so a rig that worked out where the selection
-    /// ought to end up would sooner or later be measuring how long it takes to
-    /// draw a spawn that was already on the screen — which reads as a switch
-    /// that took no time at all, and is the one wrong answer this measurement
-    /// could give.
+    /// Move the selection, and time until the slot shows another spawn. Where
+    /// it lands is deliberately not predicted: the list re-sorts, and a
+    /// predicted target could already be on screen — a switch of no time at
+    /// all.
     fn switch(&mut self, key: &[u8]) -> Duration {
         let before = self.showing();
         let sent = self.types(key);
@@ -569,18 +472,10 @@ impl App {
         }
     }
 
-    /// How far behind what a spawn drew the screen is running.
-    ///
-    /// The stand-in stamps every screen it draws with the time it drew it, so
-    /// this is the whole path measured at once: the child's write, tmux, the
-    /// control-mode stream, the one reader thread, the emulator, the app's frame
-    /// — and the rig's own emulator on the end of it.
-    ///
-    /// **One pane, not twenty.** The first `at=` on the app's screen is the one
-    /// in the slot, so this is the lag of the spawn being *looked at* while
-    /// nineteen others draw off screen. Those nineteen are load on the single
-    /// reader rather than samples of it; whether any of them ran further behind
-    /// is not something this can see, and the evidence document says so.
+    /// How far behind what a spawn drew the screen is running, via the
+    /// stand-in's timestamp — the whole path, child's write to rig emulator.
+    /// One pane, not twenty: the lag of the spawn being looked at while
+    /// nineteen others load the reader; the evidence document says so.
     fn lag(&self) -> Option<Duration> {
         let screen = self.screen();
         let stamped = screen.split("at=").nth(1)?;
@@ -614,9 +509,7 @@ const START: &[u8] = b"\x1b[15~";
 const QUIT: &[u8] = b"\x1b[21~";
 const TAB: &[u8] = b"\t";
 
-// ---------------------------------------------------------------------------
-// What was measured
-// ---------------------------------------------------------------------------
+// --- What was measured ---
 
 /// A set of timings, said the way a report wants them.
 fn spread(name: &str, timings: &[Duration]) -> String {
@@ -625,10 +518,7 @@ fn spread(name: &str, timings: &[Duration]) -> String {
         .map(|timing| timing.as_secs_f64() * 1000.0)
         .collect();
     sorted.sort_by(f64::total_cmp);
-    // **A run that sampled nothing is a result, not a crash.** Every collector
-    // here keeps only the ticks it could read something off, so an empty set is
-    // an outcome the rig has to be able to print — and a report that took the
-    // run down rather than saying so would lose the measurements beside it.
+    // An empty sample set is a result to print, not a crash.
     let Some(worst) = sorted.last().copied() else {
         return format!("{name}: nothing was sampled");
     };
@@ -644,7 +534,6 @@ fn spread(name: &str, timings: &[Duration]) -> String {
     )
 }
 
-/// A set of timings with nothing in it is said, rather than taking the run down.
 #[test]
 fn a_measurement_that_collected_no_samples_is_reported_rather_than_fatal() {
     assert_eq!(
@@ -653,7 +542,6 @@ fn a_measurement_that_collected_no_samples_is_reported_rather_than_fatal() {
     );
 }
 
-/// And one sample is still a spread, rather than an off-by-one into the range.
 #[test]
 fn a_single_sample_is_its_own_median_and_its_own_worst() {
     let said = spread("a lag", &[Duration::from_millis(7)]);
@@ -664,9 +552,6 @@ fn a_single_sample_is_its_own_median_and_its_own_worst() {
 }
 
 /// A count, as something to divide by.
-///
-/// Written out rather than cast in place: a count is small and a division by it
-/// is exact, and saying so once is cheaper than saying it at every use.
 fn how_many(counted: usize) -> f64 {
     f64::from(u32::try_from(counted).unwrap_or(u32::MAX))
 }
@@ -679,13 +564,9 @@ fn epoch_now() -> f64 {
         .as_secs_f64()
 }
 
-/// **Twenty spawns at once**, and what each part of it cost.
-///
-/// One test rather than six, because each measurement is about a machine
-/// carrying the other nineteen spawns while it is taken — and six tests would
-/// either share the machine or measure it empty. Each step says what it found
-/// the moment it finds it, so a step that fails does not take the ones before it
-/// down with it.
+/// One test rather than six: each measurement is about a machine carrying the
+/// other nineteen spawns while it is taken. Each step reports the moment it
+/// knows, so a later failure keeps earlier results.
 #[test]
 #[ignore = "a measurement rig: it takes a minute and wants the machine to itself"]
 fn twenty_spawns_at_once() {
@@ -706,8 +587,8 @@ fn twenty_spawns_at_once() {
     what_it_leaves_behind(&mut app);
 }
 
-/// Twenty spawns, over four repositories, all of them live — and what the list
-/// says about them once every status has settled.
+/// Twenty spawns live over four repositories, and what the list says once
+/// every status has settled.
 fn all_of_them_live(rig: &Rig, app: &mut App, started: Instant) -> Vec<String> {
     for work in WORK {
         app.wait_for(&work.replace(' ', "-"));
@@ -736,8 +617,8 @@ fn all_of_them_live(rig: &Rig, app: &mut App, started: Instant) -> Vec<String> {
         windows.lines().count()
     ));
 
-    // Past the grace period, so the spawn nothing can be read about has settled
-    // into `unknown` and all three statuses are on the list at once.
+    // Past the grace period, so the unreadable spawn has settled into
+    // `unknown` and all three statuses are on the list at once.
     thread::sleep(GRACE);
     let settled = app.screen();
     let names = names_on(&settled);
@@ -751,8 +632,8 @@ fn all_of_them_live(rig: &Rig, app: &mut App, started: Instant) -> Vec<String> {
     names
 }
 
-/// What the two processes are holding, and whether thirty seconds of twenty
-/// spawns redrawing moves it.
+/// What the two processes hold, and whether thirty seconds of twenty spawns
+/// redrawing moves it.
 fn what_is_held(rig: &Rig, app: &mut App) {
     let server: u32 = rig
         .tmux(&["display-message", "-p", "#{pid}"])
@@ -791,12 +672,9 @@ fn how_far_behind(app: &mut App) {
     ));
 }
 
-/// Switching, mid-turn: all the way down the list and all the way back.
-///
-/// The selection stops at both ends rather than wrapping, so this is nineteen
-/// moves each way rather than twenty — and it is walked to the top first,
-/// because the app opens on the spawn that was started *first* and the
-/// attention-first order has since moved that into the middle of its group.
+/// Switching, mid-turn: nineteen moves each way, since the selection stops at
+/// the ends rather than wrapping; walked to the top first because the opening
+/// selection has since moved into the middle of its group.
 fn switching_between_them(app: &mut App, spawns: usize) {
     for _ in 0..spawns {
         app.types(UP);
@@ -827,11 +705,9 @@ fn a_creation_that_takes_its_time(app: &mut App, repositories: &[PathBuf]) {
     let asking = Instant::now();
     app.types(START);
 
-    // Everything typed above is still queued: the app reads one keystroke a
-    // frame, so the form is waited for rather than assumed. Once it is up, the
-    // selection is walked between two spawns further down the list — never back
-    // onto the draft, whose slot holds a form rather than a session and so is
-    // not a spawn to have switched to.
+    // The app reads one keystroke a frame, so the form is waited for. The
+    // selection then walks between two spawns below the draft — never back
+    // onto it, since its slot holds a form rather than a session.
     app.wait_for("NEW SPAWN");
     let mut during = Vec::new();
     let mut drawing = 0;
@@ -892,8 +768,7 @@ fn asked_for(repositories: &[PathBuf]) -> Vec<String> {
     arguments
 }
 
-/// Say something the moment it is known, rather than at the end: a measurement
-/// that fails later must not take the ones already taken with it.
+/// Report the moment it is known, so a later failure keeps earlier results.
 fn said(what: &str) {
     println!("\n--- {what}");
 }
@@ -936,20 +811,10 @@ fn names_on(screen: &str) -> Vec<String> {
     found
 }
 
-/// **What one tick actually costs**, counted rather than reasoned about.
-///
-/// The design says a tick is one `list-panes` covering every spawn at once, plus
-/// a stat per live spawn read only when it has moved, and a `ps` probe that is a
-/// tie-breaker rather than a per-tick cost. Every clause of that is a count, so
-/// the app is run under `strace` and the counts are taken.
-///
-/// **The numbers here are shapes, not speeds.** Tracing every file a program
-/// touches makes everything slower, so what is worth reading is the ratio: how
-/// many subprocesses per tick, how many stats per tick, how many of those stats
-/// turned into a read.
-///
-/// Run it on its own — `--test-threads=1` — or it shares four cores with forty
-/// panes and measures the contention instead.
+/// The design's tick-cost claims — one `list-panes` per tick, a stat per live
+/// spawn only when it moved, `ps` only as a tie-breaker — counted under
+/// `strace`. The numbers are ratios, not speeds: tracing slows everything.
+/// Run it with `--test-threads=1` or it measures contention.
 #[test]
 #[ignore = "a measurement rig: it takes a minute and wants the machine to itself"]
 fn what_a_tick_costs_at_twenty_spawns() {
@@ -964,9 +829,8 @@ fn what_a_tick_costs_at_twenty_spawns() {
     for work in WORK {
         app.wait_for(&work.replace(' ', "-"));
     }
-    // Past the grace period, so the spawn the app cannot account for is running
-    // its tie-breaker — which is the per-spawn cost the design says a tick must
-    // not have twenty of.
+    // Past the grace period, so the unaccounted-for spawn is running its
+    // tie-breaker — the per-spawn cost a tick must not have twenty of.
     thread::sleep(GRACE);
 
     let from = epoch_now();
@@ -978,18 +842,10 @@ fn what_a_tick_costs_at_twenty_spawns() {
         fs::copy(&log, PathBuf::from(keep)).unwrap();
     }
 
-    // Everything under the app is traced, stand-ins included, and they run
-    // programs of their own — so what each line is *about* has to be read off
-    // the line. It can be: the app reaches for `tmux`, `ps` and `git` and the
-    // stand-ins reach for nothing but `mkdir`, and only the app reads a session
-    // record. Every program the trace saw is reported below rather than only the
-    // ones expected, so nothing is quietly left out of the count.
-    //
-    // Following `clone` instead — which would attribute every process to
-    // whatever forked it — was tried and abandoned: tracing it stops the whole
-    // tree on every thread and every fork, and the app slowed from five ticks a
-    // second to one in ten seconds. A measurement that changes what it measures
-    // by that much is not one.
+    // Stand-ins are traced too, so what each line is about is read off the
+    // line, and every program seen is reported rather than only the expected
+    // ones. Attributing by parent (tracing `clone`) slowed the app roughly
+    // fifty-fold, which is not a measurement.
     let mut ticks = 0;
     let mut ticked: Vec<f64> = Vec::new();
     let mut ran: Vec<String> = Vec::new();
@@ -1004,10 +860,7 @@ fn what_a_tick_costs_at_twenty_spawns() {
         }
 
         if call.starts_with("execve(") {
-            // Only the ones that worked. A program named without a path is
-            // looked for on each `PATH` directory in turn, and every miss is an
-            // `execve` of its own — eleven attempts here for one process, which
-            // is the C library searching rather than the app doing anything.
+            // Only successful ones: the PATH search makes an execve per miss.
             if !line.ends_with("= 0") {
                 continue;
             }
@@ -1040,10 +893,8 @@ fn what_a_tick_costs_at_twenty_spawns() {
         .iter()
         .filter(|program| THE_APPS_OWN.contains(&program.as_str()))
         .count();
-    // One rate per program as well as the total. The total answers "how many
-    // processes a tick", but the design's claim is specifically about the
-    // *listing* — one `tmux` however many spawns there are — and a combined
-    // figure with a stray `ps` inside it cannot be read as saying that.
+    // One rate per program as well as the total: the design's claim is about
+    // the listing specifically.
     let each: Vec<String> = THE_APPS_OWN
         .iter()
         .map(|program| {
@@ -1073,11 +924,8 @@ fn what_a_tick_costs_at_twenty_spawns() {
     ));
 }
 
-/// What the app runs, as against what the stand-ins in its panes run.
-///
-/// Named here rather than inferred: these three are the whole of what the app
-/// shells out to, and a program outside this list turning up in a tick's count
-/// would be worth knowing about rather than worth hiding.
+/// The whole of what the app shells out to; a program outside this list in a
+/// tick's count would be worth knowing about.
 const THE_APPS_OWN: [&str; 3] = ["tmux", "ps", "git"];
 
 /// One line of a trace: which thread, when, and what it called.
@@ -1105,8 +953,7 @@ fn traced_by(tracer: u32) -> u32 {
     }
 }
 
-/// The first thing in double quotes on a line, which for an `execve` is the
-/// program it ran.
+/// The first double-quoted thing on a line — for an `execve`, the program.
 fn quoted(line: &str) -> Option<String> {
     Some(line.split('"').nth(1)?.to_string())
 }

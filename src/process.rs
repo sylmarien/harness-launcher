@@ -1,9 +1,7 @@
-//! Running one external command and reading what it said — and asking, before
-//! anything is created, whether a command could be run at all.
+//! Running one external command and reading what it said.
 //!
-//! `git` and `tmux` are both driven this way: one process per call, arguments
-//! passed as a vector so nothing is ever quoted for a shell, and no shell in the
-//! path at all.
+//! Arguments are passed as a vector, so nothing is ever quoted for a shell and
+//! no shell is involved.
 
 use std::env;
 use std::ffi::OsString;
@@ -24,10 +22,8 @@ pub struct Outcome {
     pub stderr: String,
 }
 
-/// Run a command and return what it said, whether or not it succeeded.
-///
-/// Only the command failing to *start* is a refusal here — a non-zero exit is an
-/// answer, and several callers ask questions where "no" is the useful reply.
+/// Run a command and return what it said, whether or not it succeeded; only
+/// failing to start is an error here.
 pub fn run<A: AsRef<str>>(program: &str, args: &[A]) -> Result<Outcome> {
     let output = Command::new(program)
         .args(args.iter().map(AsRef::as_ref))
@@ -45,10 +41,8 @@ pub fn run<A: AsRef<str>>(program: &str, args: &[A]) -> Result<Outcome> {
     })
 }
 
-/// Run a command that is expected to succeed, and return its standard output.
-///
-/// A non-zero exit becomes a refusal carrying the command's own complaint, which
-/// is nearly always more specific than anything this app could say instead.
+/// Run a command that is expected to succeed, and return its standard output;
+/// a non-zero exit becomes an error carrying the command's own complaint.
 pub fn run_ok<A: AsRef<str>>(program: &str, args: &[A]) -> Result<String> {
     let outcome = run(program, args)?;
     if outcome.ok {
@@ -66,10 +60,8 @@ pub fn run_ok<A: AsRef<str>>(program: &str, args: &[A]) -> Result<String> {
     )))
 }
 
-/// A path on its way to becoming a command-line argument.
-///
-/// Paths reach `git` and `tmux` as text, so one that is not valid UTF-8 is
-/// refused rather than mangled into something that would name a different file.
+/// A path as a command-line argument; a non-UTF-8 path is refused rather than
+/// mangled into a different file name.
 pub fn path_argument(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| {
         Error::new(format!(
@@ -79,19 +71,9 @@ pub fn path_argument(path: &Path) -> Result<&str> {
     })
 }
 
-/// Whether this machine could actually run `program`, asked before anything is
-/// created rather than found out by trying.
-///
-/// **The `PATH` is passed in rather than read here.** It is what makes this a
-/// rule that can be tested at all: the answer would otherwise depend on whatever
-/// happened to be installed on the machine running the tests, which is exactly
-/// the kind of test that passes on a laptop and fails in CI.
-///
-/// A bare program name, looked for the way a shell would look for one: each
-/// directory of the `PATH` in turn, and the file has to be one something can
-/// execute. A file of the right name that nothing can run is not the program —
-/// finding it would move the failure to the moment the harness was started,
-/// which is after the worktree, the branch and the pane exist.
+/// Whether `program` is an executable file on `path`, looked for the way a
+/// shell would. The `PATH` is passed in rather than read here, so the rule can
+/// be tested independently of the machine.
 pub fn runnable_on(path: Option<OsString>, program: &str) -> bool {
     let Some(path) = path else {
         return false;
@@ -100,11 +82,8 @@ pub fn runnable_on(path: Option<OsString>, program: &str) -> bool {
     env::split_paths(&path).any(|directory| executable(&directory.join(program)))
 }
 
-/// Whether this is a file something can execute.
-///
-/// Followed rather than inspected as a link: a program installed by a version
-/// manager is very often a symlink, and the thing that matters is what it points
-/// at.
+/// Whether this is a file something can execute; symlinks are followed, since
+/// version managers install programs as symlinks.
 fn executable(candidate: &Path) -> bool {
     fs::metadata(candidate)
         .is_ok_and(|about| about.is_file() && about.permissions().mode() & 0o111 != 0)
@@ -168,8 +147,6 @@ pub(crate) mod tests {
         assert!(!runnable_on(Some(path(&[&bin])), "some-harness"));
     }
 
-    /// Later directories are looked in too, which is how a program installed
-    /// somewhere other than the first entry is still found.
     #[test]
     fn every_directory_on_the_path_is_looked_in() {
         let first = holding("something-else", true);
@@ -178,8 +155,6 @@ pub(crate) mod tests {
         assert!(runnable_on(Some(path(&[&first, &second])), "some-harness"));
     }
 
-    /// A file of that name which nothing can execute would fail at the moment
-    /// it mattered — after the worktree, the branch and the pane were made.
     #[test]
     fn a_file_of_the_right_name_that_cannot_be_run_is_not_the_program() {
         let bin = holding("some-harness", false);

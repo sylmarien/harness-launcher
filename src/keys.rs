@@ -1,31 +1,20 @@
-//! A keystroke, as the spawn would have felt it.
+//! A keystroke, as the bytes a terminal would have sent for it.
 //!
-//! The app is the terminal the spawn is typed into, so every key has to be
-//! turned back into the bytes a terminal would have sent. Pure, and worth being
-//! pure: this is a table of conventions — some of them older than the terminals
-//! that still speak them — and a table is a thing to read off rather than a
-//! thing to trust to a running program.
-//!
-//! What it is *not* is a keymap. Which keys the app keeps for itself is settled
-//! by whoever calls this; everything that reaches here is on its way to a spawn.
+//! A table of terminal conventions, not a keymap: which keys the app keeps for
+//! itself is decided by the caller.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// The modes a spawn has put its terminal in that change what a key sends.
-///
-/// Read off the spawn's own screen rather than remembered here: the program
-/// decides, mid-run, and a keyboard that guessed would send an arrow key that
-/// moved nothing.
+/// The modes a spawn has put its terminal in that change what a key sends;
+/// read off the spawn's own screen rather than remembered here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Modes {
     /// Whether arrow keys are wanted in their application form.
     pub application_cursor: bool,
 }
 
-/// What a terminal would have sent for this key.
-///
-/// Nothing at all, for a key with no byte behind it — a bare modifier, or one of
-/// the keys only terminals that have been told to report them ever send.
+/// What a terminal would have sent for this key — nothing, for a key with no
+/// byte behind it.
 pub fn typed(key: KeyEvent, modes: Modes) -> Vec<u8> {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -52,8 +41,7 @@ pub fn typed(key: KeyEvent, modes: Modes) -> Vec<u8> {
         _ => Vec::new(),
     };
 
-    // Alt is a prefix rather than a key: the terminal sends escape, then
-    // whatever the key would have sent on its own.
+    // Alt is a prefix: escape, then whatever the key sends on its own.
     if alt && !bytes.is_empty() {
         bytes.insert(0, 0x1b);
     }
@@ -61,11 +49,7 @@ pub fn typed(key: KeyEvent, modes: Modes) -> Vec<u8> {
     bytes
 }
 
-/// What holding control turns a character into.
-///
-/// The bottom five bits of the upper-case letter, which is why control and the
-/// letter it is held with are one byte rather than two — and why interrupting a
-/// spawn is `03` and nothing more elaborate.
+/// Control masks the upper-case letter to its bottom five bits.
 fn controlled(character: char) -> Vec<u8> {
     let upper = character.to_ascii_uppercase();
     match upper {
@@ -76,11 +60,7 @@ fn controlled(character: char) -> Vec<u8> {
     }
 }
 
-/// An arrow or a corner, in whichever form the spawn asked for.
-///
-/// The same key, two escape sequences: programs that draw a full screen usually
-/// ask for the application form, and a terminal that sends the other one has
-/// keys that do nothing.
+/// An arrow or a corner, in whichever escape form the spawn asked for.
 fn arrow(letter: u8, modes: Modes) -> Vec<u8> {
     let introducer = if modes.application_cursor { b'O' } else { b'[' };
 
@@ -92,11 +72,7 @@ fn tilde(number: u8) -> Vec<u8> {
     format!("\x1b[{number}~").into_bytes()
 }
 
-/// A function key, in the two shapes they come in.
-///
-/// The first four are the terminal's own; the rest are numbered, and the
-/// numbering skips — which is a historical accident rather than a pattern, and
-/// the reason this is a table.
+/// A function key; the numbering skips, which is why this is a table.
 fn function(number: u8) -> Vec<u8> {
     match number {
         1..=4 => vec![0x1b, b'O', b'P' + (number - 1)],

@@ -1,37 +1,19 @@
 //! One spawn's screen, and the emulator that keeps it.
 //!
-//! The app is the terminal now. Bytes arrive from the control-mode client,
-//! [`Screen::apply`] feeds them to an emulator, and the grid that comes out is
-//! drawn into whatever part of the app's own screen the spawn is showing in.
-//! **One grid per spawn, live whether or not it is the one on display** — which
-//! is what makes changing which spawn you are looking at a re-render rather than
-//! anything happening to a process.
-//!
-//! **No scrollback.** The grid is a screen, not a history: a spawn costs one
-//! screenful of cells and nothing accumulates, which is what makes twenty of
-//! them cost megabytes. It is coherent rather than lossy because the app starts
-//! the harness on the alternate screen, where a transcript never scrolls off the
-//! top in the first place.
-//!
-//! **Nothing is written back to the child from here.** A terminal answers
-//! questions — where is the cursor, what are you — and the emulator behind this
-//! grid answers none of them. It does not have to: tmux is the terminal the
-//! child is actually connected to, and it replies to those queries itself before
-//! ever passing the bytes on. This grid renders a copy of that conversation. An
-//! answer of the app's own would not fill a gap; it would arrive at the child as
-//! a second reply, which is to say as keystrokes nobody typed. The integration
-//! test in [`crate::control`] is what pins that down.
+//! One grid per spawn, live whether or not it is on display, so switching
+//! spawns is a re-render. No scrollback: the harness runs on the alternate
+//! screen, so one screenful of cells per spawn loses nothing. There is no
+//! write-back path on purpose — tmux is the child's real terminal and answers
+//! its queries itself; a reply of the app's own would arrive as keystrokes
+//! nobody typed, which the integration test in [`crate::control`] pins down.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Widget;
 
-/// How big something on a terminal is, in cells.
-///
-/// Columns first, because that is the order a terminal is talked about in;
-/// tmux's own arguments and the emulator's both want it the other way round,
-/// and this type is where that is remembered so nowhere else has to.
+/// A size in cells, columns first; tmux and the emulator both want it the
+/// other way round, and this type is where that is remembered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Size {
     /// How many cells across.
@@ -49,11 +31,8 @@ impl Size {
         }
     }
 
-    /// Whether there is any screen here at all.
-    ///
-    /// A terminal with no cells in it is not a small terminal: emulators and
-    /// multiplexers alike take a zero as a refusal or a bad size, and the app
-    /// can be given one by nothing worse than a window dragged very small.
+    /// Whether there is any screen here at all; emulators and multiplexers
+    /// treat a zero dimension as an error.
     pub fn is_empty(self) -> bool {
         self.columns == 0 || self.rows == 0
     }
@@ -77,11 +56,8 @@ impl Screen {
         self.emulator.process(bytes);
     }
 
-    /// Become a different shape, when the app's own window becomes one.
-    ///
-    /// Told rather than asked: the child is resized by tmux, and this is the
-    /// grid catching up with the size the child has already been given. A size
-    /// with no cells in it is ignored rather than passed on.
+    /// Catch up with the size tmux has already given the child. An empty size
+    /// is ignored.
     pub fn resize(&mut self, size: Size) {
         if size.is_empty() || size == self.size() {
             return;
@@ -109,12 +85,8 @@ impl Screen {
         Some((column, row))
     }
 
-    /// Whether the spawn asked for arrow keys in their application form.
-    ///
-    /// A terminal sends a different escape sequence for the same arrow key
-    /// depending on a mode the program itself sets, so this is not a detail the
-    /// keyboard can settle on its own — it has to be read off the screen the
-    /// keystroke is going to.
+    /// Whether the spawn asked for arrow keys in their application form; the
+    /// program sets this mid-run, so it is read off the screen.
     pub fn application_cursor(&self) -> bool {
         self.emulator.screen().application_cursor()
     }
@@ -124,12 +96,8 @@ impl Screen {
 const NO_SCROLLBACK: usize = 0;
 
 impl Widget for &Screen {
-    /// Draw the grid into a region of the app's screen.
-    ///
-    /// Cell by cell rather than through a widget that wraps the emulator. The
-    /// grid is already the same shape as the region — it was made that way and
-    /// resized with it — so this is a copy, and doing it here is what keeps the
-    /// question about the emulator's fidelity rather than a wrapper's.
+    /// Draw the grid into a region of the app's screen, cell by cell; the grid
+    /// is already the region's shape.
     fn render(self, area: Rect, buffer: &mut Buffer) {
         let screen = self.emulator.screen();
 
@@ -142,10 +110,8 @@ impl Widget for &Screen {
                     continue;
                 };
 
-                // A wide character occupies the cell it is in and the one after
-                // it. Giving the second cell a symbol of its own would push the
-                // rest of the line along by one, so it is left empty and the
-                // terminal's own idea of the first cell's width covers both.
+                // A wide character owns the next cell too; giving that cell a
+                // symbol of its own would push the rest of the line along.
                 if from.is_wide_continuation() {
                     into.set_symbol("");
                     continue;
@@ -186,11 +152,8 @@ fn styled(cell: &vt100::Cell) -> Style {
     style
 }
 
-/// A colour the emulator read, in the terminal library's words.
-///
-/// The default is `None` rather than a colour of the app's choosing: a spawn
-/// that has not said what colour it wants should inherit the user's terminal,
-/// exactly as it would if they had started it themselves.
+/// A colour the emulator read, in the terminal library's words. Default maps
+/// to `None` so an unstyled spawn inherits the user's terminal.
 fn coloured(colour: vt100::Color) -> Option<Color> {
     match colour {
         vt100::Color::Default => None,
@@ -204,10 +167,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::control::Output;
 
-    /// A real control-mode recording of a real program drawing itself — see
-    /// `captured/README.md`. Bytes, not text: what a spawn draws is not
-    /// obliged to be valid UTF-8, and a reading of it that assumes otherwise
-    /// would pass here and fail on the first half-written wide character.
+    /// A real control-mode recording — see `captured/README.md`. Bytes, not
+    /// text: what a spawn draws need not be valid UTF-8.
     const CAPTURED: &[u8] = include_bytes!("../captured/tmux-control-mode.txt");
 
     /// The shape the recording was made at.
@@ -228,11 +189,8 @@ pub(crate) mod tests {
         screen
     }
 
-    /// What the grid drew, one entry per cell of the app's own screen.
-    ///
-    /// The cells rather than what a terminal would make of them: whether a
-    /// character lands in the right *cell* is the whole question here, and a row
-    /// read back as one string has already thrown that away.
+    /// What the grid drew, one entry per cell — which cell a character lands
+    /// in is the whole question here.
     fn cells(screen: &Screen) -> Vec<Vec<String>> {
         let size = screen.size();
         let area = Rect::new(0, 0, size.columns, size.rows);
@@ -248,10 +206,8 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// What the grid says, one string per row.
-    ///
-    /// Shared with the control-mode client's tests, which have the same
-    /// question to ask of a grid and no business answering it a second way.
+    /// What the grid says, one string per row; shared with the control-mode
+    /// client's tests.
     pub fn shown(screen: &Screen) -> Vec<String> {
         cells(screen).iter().map(|row| row.concat()).collect()
     }
@@ -281,14 +237,11 @@ pub(crate) mod tests {
     fn a_wide_character_takes_two_cells_and_moves_nothing_along() {
         let cells = cells(&recorded());
 
-        // The cell after a wide character belongs to it, and holds nothing of
-        // its own: anything written there would be drawn a column further along
-        // than the terminal is going to put it.
         let wide = column_of(&cells[1], "世");
         assert_eq!(cells[1][wide + 1], "", "{:?}", cells[1]);
 
-        // And the proof that it added up: the box the wide characters are inside
-        // closes in the same column as the one above it.
+        // The box closes in the same column as the row above, so the widths
+        // added up.
         assert_eq!(
             cells[1].iter().rposition(|cell| cell == "│"),
             cells[0].iter().rposition(|cell| cell == "┐"),

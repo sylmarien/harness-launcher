@@ -1,20 +1,13 @@
 //! The harness seam: the one place that knows what the app launches.
 //!
-//! Everything harness-specific lives here — the binary name, its flags, its
-//! environment, the choices it offers. Two invariants keep it that way, and both
-//! are checked mechanically in CI:
+//! Two invariants, both checked mechanically in CI:
 //!
 //! - nothing outside this module names the harness;
-//! - this module touches no process, filesystem or tmux API.
+//! - this module performs no I/O — it translates a spec into plain data, and
+//!   the app acts.
 //!
-//! The second is what makes the first hold: **this module performs no I/O.** It
-//! translates a spec into plain data; the app is what acts. That also makes the
-//! whole seam testable without a process, a terminal or a multiplexer.
-//!
-//! There is deliberately no harness *abstraction* here — no trait with one
-//! implementation behind it. One adapter makes a seam hypothetical; two make it
-//! real, and an interface shaped by a single harness is an interface shaped by
-//! *this* harness.
+//! There is deliberately no harness trait: one adapter makes a seam
+//! hypothetical.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -24,28 +17,12 @@ const PROGRAM: &str = "claude";
 
 /// The glyph a row wears to say which harness its spawn is running.
 ///
-/// Plain data beside the program name, like the models and the effort levels:
-/// which harness a spawn runs is a harness fact, so the one place that knows
-/// what the app launches is the one place that says what it looks like. There
-/// is one of these because there is one harness — a second arriving is what
-/// turns this into something with a harness on one side of it, and not before.
-///
-/// **One character**, because the row it goes on is measured in characters: the
-/// name beside it is cut to whatever is left of them, so a glyph of two would
-/// quietly take a character off every name in the list.
-///
-/// *Accepted cost, and it is the app's own convention rather than this
-/// constant's:* a character is not a cell, so a glyph a terminal chooses to draw
-/// double-width still pushes its row one cell over. Everything the app measures
-/// it measures in characters — the names, the cuts, the padding — and one glyph
-/// is not the place to start counting cells instead.
+/// One character, because rows are measured in characters and a wider glyph
+/// would shorten every name in the list. Accepted cost: a terminal that draws
+/// it double-width pushes its row one cell over.
 pub const GLYPH: &str = "✻";
 
 /// One option the harness offers, as the spawn form will show it.
-///
-/// The question this answers is "what does this harness let you choose?", not
-/// "what flags does this harness take?" — the first survives a harness whose
-/// choices come from a config file, the second does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Choice {
     /// What the app passes back when this option is picked.
@@ -55,12 +32,7 @@ pub struct Choice {
 }
 
 /// One list of options the harness offers, as the spawn form will show it.
-///
-/// The form draws a title and some labels and can say which one is picked. It
-/// is told nothing else — not that one of these lists is about models, not what
-/// any id means, not that the harness has exactly two of them. That is what
-/// keeps the form a form: the question it asks is always *"which of these?"*,
-/// and every answer to it comes from here.
+/// The form is told titles and labels and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choices {
     /// What the form calls the list.
@@ -71,15 +43,8 @@ pub struct Choices {
     pub default: Choice,
 }
 
-/// Everything the harness lets you choose when starting a session.
-///
-/// In the order the form asks: what runs the work, then how much of itself it
-/// spends on it.
-///
-/// A harness with nothing to offer under one of these headings returns an empty
-/// list rather than a placeholder, and the form omits that control entirely —
-/// which is why this returns the lists as they are rather than promising each
-/// of them has something in it.
+/// Everything the harness lets you choose when starting a session, in the
+/// order the form asks. An empty list means the form omits that control.
 pub fn choices() -> Vec<Choices> {
     vec![
         Choices {
@@ -112,23 +77,10 @@ pub struct SpawnSpec {
 
 /// The spec a set of answers describes.
 ///
-/// Whatever asked the questions — a form in the app, or a command line — asked
-/// *"which of these?"* and was told nothing else, so what comes back is a bag
-/// of ids with no headings on it. This is where they become the harness's own
-/// vocabulary again: **each list recognises its own**, so the order the answers
-/// arrive in is not a contract, and a list dropped for having nothing in it
-/// leaves no hole to line up against.
-///
-/// Anything unanswered is what the harness would have picked itself. The caller
-/// cannot tell one list from another — that is the whole point of asking the
-/// question the way [`choices`] does — so it cannot be asked to check them
-/// either.
-///
-/// *Accepted cost, and it is this module's to keep true:* recognising an answer
-/// by looking for it means **an id offered under two headings would be
-/// ambiguous**, and the first list asked would win it. Nothing outside here can
-/// see that, let alone prevent it, so the rule lives with the lists: ids are
-/// unique across every list [`choices`] offers. A test below holds it.
+/// Answers arrive as anonymous ids; each list recognises its own, so their
+/// order is not a contract, and anything unanswered gets the harness's own
+/// default. This requires ids to be unique across every list [`choices`]
+/// offers — a test below holds it.
 pub fn spec_from(name: String, work: String, worktree: PathBuf, answers: &[String]) -> SpawnSpec {
     SpawnSpec {
         name,
@@ -150,14 +102,7 @@ fn picked(offered: &[Choice], answers: &[String], default: Choice) -> String {
 }
 
 /// What has to be installed before a spawn can be started at all, and the one
-/// line that fixes it not being.
-///
-/// **Described here and checked by the app**, like everything else across this
-/// seam: the module knows *what* must be there and what to say about it missing,
-/// and does none of the finding out — no lookup, no process, no filesystem.
-/// `PATH` is named once, inside the sentence handed to the user, because that is
-/// where they will have to go and fix it; naming it is not consulting it, and
-/// nothing here ever reads it.
+/// line that fixes it not being. Described here, checked by the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Requirement {
     /// The program that must be runnable — the same one [`launch_recipe`] names.
@@ -166,12 +111,9 @@ pub struct Requirement {
     pub fix: &'static str,
 }
 
-/// The one thing that has to be installed for this harness to run.
-///
-/// The fix names no installation command on purpose: how Claude Code is
-/// installed differs by machine and changes between versions, and a refusal
-/// confidently telling somebody to run the wrong one is worse than a refusal
-/// that says exactly what is wrong and leaves the how to them.
+/// The one thing that has to be installed for this harness to run. The fix
+/// names no installation command on purpose: it differs by machine, and a
+/// confidently wrong command is worse than none.
 pub fn requirement() -> Requirement {
     Requirement {
         program: PROGRAM,
@@ -237,55 +179,25 @@ pub fn effort_levels() -> Vec<Choice> {
 }
 
 /// What a spawn runs on when the user says nothing.
-///
-/// Named rather than positional, because the two lists are not ordered the same
-/// way: models run most-capable first, effort levels run by how much thinking
-/// they buy. A default picked by index would follow whichever order it landed in
-/// and change silently when one of them was re-ordered.
 pub fn default_model() -> Choice {
     OPUS
 }
 
-/// The effort a spawn spends when the user says nothing.
-///
-/// Neither the least nor the most: a spawn is work handed over to run
-/// unattended, which is the case for thinking about it — and `max` is a price
-/// worth choosing deliberately rather than inheriting.
+/// The effort a spawn spends when the user says nothing. Not `max`: that is a
+/// price worth choosing deliberately rather than inheriting.
 pub fn default_effort_level() -> Choice {
     HIGH
 }
 
 /// Turn a spec into the command line that starts the session.
 ///
-/// The work is a positional argument, so it cannot be swallowed by a text box
-/// and needs no verification afterwards — and because the app hands the child an
-/// argument vector rather than a shell string, nothing in it needs quoting.
-///
-/// `CLAUDE_CODE_NO_FLICKER=1` forces the fullscreen renderer, which draws on the
-/// alternate screen. It is a requirement rather than a preference, and the
-/// reasons are the app's own rather than the multiplexer's: the grid the app
-/// holds per spawn is a **screen and not a history**, so a spawn costs one
-/// screenful of cells and twenty cost megabytes; and the alternate screen is
-/// what keeps a transcript out of a scrollback **the app does not implement** —
-/// under the classic renderer output scrolls off the top of the grid and is
-/// simply gone.
-///
-/// *Its two original reasons have both expired, and are recorded here because
-/// the superseded reasoning is the part that would otherwise be silently
-/// reinvented.* It was chosen for tmux's server memory, which stopped mattering
-/// when the app took the grids over, and reinforced by a redraw test about
-/// parking a pane — a mechanism that no longer exists. A decision's reasons can
-/// expire before the decision does; these were re-derived rather than
-/// inherited.
-///
-/// The variable is the one Claude Code itself documents as the equivalent of the
-/// `tui: "fullscreen"` setting — *"the flicker-free alt-screen renderer with
-/// virtualized scrollback"* — read from the shipped binary's own settings schema
-/// at v2.1.226, and confirmed by running a spawn and reading the child's
-/// environment. It is an internal detail of another program, so treat it as
-/// fallible: if a future version drops it, the fullscreen requirement stops
-/// holding **silently**, and no test here can tell you that. Only starting one
-/// and looking can.
+/// The work is a positional argument in an argument vector, so nothing in it
+/// needs quoting. `CLAUDE_CODE_NO_FLICKER=1` is a requirement, not a
+/// preference: the grid the app holds per spawn is a screen and not a history,
+/// and the alternate screen keeps the transcript out of a scrollback the app
+/// does not implement. The variable is an internal detail of Claude Code
+/// (verified at v2.1.226), so treat it as fallible: if a future version drops
+/// it, the fullscreen requirement stops holding silently.
 pub fn launch_recipe(spec: &SpawnSpec) -> LaunchRecipe {
     LaunchRecipe {
         program: PROGRAM.to_string(),
@@ -304,11 +216,7 @@ pub fn launch_recipe(spec: &SpawnSpec) -> LaunchRecipe {
 }
 
 /// What the harness's own record says a session is doing, in the app's words.
-///
-/// Two answers and an admission. The admission is here rather than as an
-/// `Err` because a record that will not resolve is not a failure of the app —
-/// it is one rung of the ladder handing over to the next, and the sentence it
-/// carries is shown to a person rather than logged.
+/// `Unresolved` is not an `Err`: it is shown to a person, not logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reading {
     /// The agent is working.
@@ -334,22 +242,16 @@ impl StatusFiles {
 }
 
 /// The environment variable that moves the harness's configuration elsewhere.
-///
-/// The app reads the environment and hands the answer back to [`status_files`];
-/// the name of the variable is a harness fact, so it lives here.
+/// The app reads it and hands the answer to [`status_files`].
 pub fn config_directory_variable() -> &'static str {
     "CLAUDE_CONFIG_DIR"
 }
 
 /// Where the harness keeps its session records, given the environment.
 ///
-/// **This is an undocumented internal detail of another program**, present
-/// since v2.1.139, and the app treats it as fallible everywhere: a missing
-/// directory, a missing file, or a record it cannot read is a rung of the
-/// ladder that did not answer, never a refusal and never a status.
-///
-/// `None` means there is nowhere to look at all, which is the same answer as
-/// looking and finding nothing — the caller has one case, not two.
+/// An undocumented internal detail of another program, present since v2.1.139,
+/// and treated as fallible everywhere. `None` means nowhere to look, which the
+/// caller treats the same as looking and finding nothing.
 pub fn status_files(configured: Option<OsString>, home: Option<OsString>) -> Option<StatusFiles> {
     let configuration = match configured {
         Some(configured) if !configured.is_empty() => PathBuf::from(configured),
@@ -366,15 +268,10 @@ pub fn status_files(configured: Option<OsString>, home: Option<OsString>) -> Opt
 
 /// Read one session record, as kept for the session running as `pid`.
 ///
-/// `busy` and `waiting` are both the agent working. `idle` is the agent
-/// stopped, and so is `shell` — a turn that ended with a background shell still
-/// alive, written by versions from v2.1.197.
-///
-/// The record names the process it belongs to, and that is checked against the
-/// process it was looked up by: the files are keyed by process id, and an
-/// operating system hands out process ids again. Believing a record left behind
-/// by a session that has gone would report a spawn as working long after it
-/// stopped, which is the one wrong answer this app is not allowed to give.
+/// `busy` and `waiting` are the agent working; `idle` and `shell` (written
+/// from v2.1.197) are the agent stopped. The record's own pid is checked
+/// because operating systems reuse process ids: a record left by a dead
+/// session would otherwise report a spawn as working long after it stopped.
 pub fn read_status(record: &str, pid: u32) -> Reading {
     let record: serde_json::Value = match serde_json::from_str(record) {
         Ok(record) => record,
@@ -421,16 +318,8 @@ const RECORDED: &str = include_str!("../../captured/session-record.json");
 #[cfg(test)]
 pub const RECORDED_PID: u32 = 531;
 
-/// The captured record, with a status in it.
-///
-/// **The capture plus one field, not a recording.** The machine this was taken
-/// from writes no `status` at all — see `captured/README.md` — so a record
-/// carrying one could not be recorded here, though the field itself has been
-/// confirmed present on an ordinary install. Everything around it is real.
-///
-/// It lives in the module that knows what a record is, so that the one place a
-/// test departs from a recording is one place rather than several, and so that
-/// replacing the capture one day fixes every test at once.
+/// The captured record with a `status` field added — the machine it was taken
+/// from writes none (see `captured/README.md`); everything around it is real.
 #[cfg(test)]
 pub fn recorded(status: &str) -> String {
     let rest = RECORDED
@@ -443,17 +332,11 @@ pub fn recorded(status: &str) -> String {
 
 /// Whether a process in a pane's foreground process group is the harness.
 ///
-/// Two names, because neither is reliable alone: `command` is what the kernel
-/// reports, **truncated to fifteen characters**, and `argv0` is whatever the
-/// program was started as, which is often a path.
-///
-/// *Accepted blind spot:* a harness started through a wrapper that replaces
-/// both — an interpreter invoked with the harness as its first argument, say —
-/// is not recognised, because the harness's name appears in neither of the two
-/// places looked at. The cost of that is a spawn read as stopped while it
-/// works, which is the direction the app is content to be wrong in; widening
-/// the search to the whole argument vector would trade it for reading `vim
-/// /etc/claude` as a live agent, which is the direction it is not.
+/// Two names because neither is reliable alone: `command` is truncated to
+/// fifteen characters by the kernel, and `argv0` is often a path. Accepted
+/// blind spot: a harness behind a wrapper (an interpreter, say) is read as
+/// stopped — searching the whole argument vector would instead read
+/// `vim /etc/claude` as a live agent.
 pub fn names_the_harness(command: &str, argv0: &str) -> bool {
     let program = argv0.rsplit('/').next().unwrap_or_default();
 
@@ -493,24 +376,16 @@ mod tests {
         );
     }
 
-    /// The row's arithmetic is characters, and it spends exactly one of them on
-    /// this. A glyph of two would take a character out of the name beside it, on
-    /// every row in the list. What a terminal makes of the one character is the
-    /// terminal's, and no test here can hold it.
     #[test]
     fn the_glyph_a_row_wears_is_one_character_wide() {
         assert_eq!(GLYPH.chars().count(), 1);
     }
 
-    /// The check and the launch must be about the same program, or the app
-    /// would refuse over one binary and then try to start another.
     #[test]
     fn what_has_to_be_installed_is_the_program_a_spawn_actually_runs() {
         assert_eq!(requirement().program, launch_recipe(&spec()).program);
     }
 
-    /// A refusal nobody can act on is barely better than a crash: this is the
-    /// one place that knows what installing this harness means.
     #[test]
     fn the_requirement_says_what_to_do_about_it_not_being_met() {
         assert!(!requirement().fix.is_empty());
@@ -576,10 +451,6 @@ mod tests {
         assert_eq!(spec.effort, default_effort_level().id);
     }
 
-    /// The rule that makes an anonymous answer resolvable at all: an id
-    /// belongs to exactly one of the lists this harness offers. Two lists
-    /// sharing one would make an answer ambiguous, and whichever list was asked
-    /// first would silently win it.
     #[test]
     fn no_id_is_offered_under_two_headings() {
         let offered: Vec<&str> = choices()
