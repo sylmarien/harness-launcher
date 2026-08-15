@@ -1,14 +1,9 @@
 //! Reading the command line.
 //!
-//! Two things a person can ask for: some spawns, or the usage text. What the app
-//! offers as a choice is not decided here — the model and effort lists come
-//! from the harness, so neither the help text nor what it accepts can drift
-//! from what the harness really takes.
-//!
-//! Several spawns are asked for by separating them, rather than by writing one
-//! repository and description after another. The reason is [`SEPARATOR`]: bare
-//! pairs would read a description somebody forgot to quote as a second spawn,
-//! which is exactly the guess the app is not allowed to make.
+//! The model and effort lists come from the harness, so neither the help text
+//! nor what it accepts can drift from what the harness really takes. Spawns
+//! are separated by [`SEPARATOR`] because bare pairs would read an unquoted
+//! description as a second spawn.
 
 use std::path::PathBuf;
 
@@ -16,14 +11,8 @@ use crate::creation::Wanted;
 use crate::error::{Error, Result};
 use crate::harness::{self, Choice};
 
-/// What separates one spawn from the next.
-///
-/// It reads as the sentence it is — *this repository and this work, **and**
-/// this repository and this work* — and it is what keeps an unquoted
-/// description an error. `<repository> add retry logic` is four words, and
-/// nothing about them says whether they are one spawn written carelessly or two
-/// spawns written deliberately; with a separator the question does not arise,
-/// and a group that is not a repository and a description says so.
+/// What separates one spawn from the next. It keeps an unquoted description an
+/// error rather than a guessed second spawn.
 const SEPARATOR: &str = "--and";
 
 /// What the app was asked to do.
@@ -39,17 +28,9 @@ pub enum Invocation {
 
 /// Work out what the arguments asked for.
 ///
-/// The line is cut into one group per spawn first, and each group is then read
-/// on its own — so the choices written in a group belong to the spawn that
-/// group describes, and a group that makes no sense names itself rather than
-/// spoiling the ones beside it.
-///
-/// **A line with nothing on it is the app being opened rather than a mistake.**
-/// Everything the command line can say can be said in the form instead, and
-/// somebody who has not decided what to work on yet has nothing to type here —
-/// so the app opens on the one thing they would have pressed `F2` for. It is a
-/// blank line rather than a flag because a flag would be a name to know for the
-/// simplest thing the app does.
+/// The line is cut into one group per spawn, and each group is read on its
+/// own. A line with nothing on it opens the app on a blank form rather than
+/// being a mistake.
 pub fn parse(arguments: Vec<String>) -> Result<Invocation> {
     let given: Vec<String> = arguments.into_iter().skip(1).collect();
     if given.is_empty() {
@@ -111,11 +92,8 @@ fn asked_for(group: &[String]) -> Result<Asked> {
         }
     };
 
-    // The two flags are named here and anonymous from here on: what the rest of
-    // the app carries is the ids that were picked, in the order the harness
-    // offers its lists, and the harness recognises its own when handed them
-    // back. That is the same thing a form hands over, which is what makes one
-    // spawn out of two roads.
+    // The flags become anonymous ids here, in the order the harness offers its
+    // lists — the same thing a form hands over.
     Ok(Asked::Spawn(Wanted {
         repository: PathBuf::from(repository),
         work,
@@ -176,11 +154,8 @@ fn value_for(flag: &str, value: Option<&str>) -> Result<String> {
         .ok_or_else(|| Error::new(format!("`{flag}` needs a value")))
 }
 
-/// Resolve what the user asked for against what the harness offers.
-///
-/// Left unsaid, it is whatever the harness would pick — the app has no opinion
-/// about which model or how much effort, and inventing one here is exactly the
-/// leak the seam exists to prevent.
+/// Resolve what the user asked for against what the harness offers. Left
+/// unsaid, it is whatever the harness would pick.
 fn chosen(
     asked_for: Option<String>,
     what: &str,
@@ -365,16 +340,11 @@ mod tests {
         );
     }
 
-    /// The simplest way to run it, and the one with nothing to learn first:
-    /// open the app and write what you want in the form it opens on.
     #[test]
     fn nothing_at_all_opens_the_app_on_a_blank_form() {
         assert_eq!(parse_arguments(&[]).unwrap(), Invocation::Compose);
     }
 
-    /// **Half a line is still a mistake.** Somebody who named a repository and
-    /// stopped meant to say more, and opening a form having thrown that away
-    /// would be the app deciding it knew better.
     #[test]
     fn too_little_to_go_on_is_refused_rather_than_taken_as_nothing() {
         assert!(parse_arguments(&["/code/project"]).is_err());
@@ -411,15 +381,11 @@ mod tests {
 
     #[test]
     fn the_usage_text_says_how_to_leave() {
-        // Few keys are the app's, and every ordinary one belongs to whatever is
-        // in the slot — so nothing on screen would tell you how to get out.
         assert!(usage().contains("F10"), "{}", usage());
     }
 
     #[test]
     fn the_usage_text_says_how_to_start_a_session_from_inside_the_app() {
-        // The command line is not the only way to start one, and it is the only
-        // place somebody who has not run the app yet is reading.
         assert!(usage().contains("F2"), "{}", usage());
     }
 

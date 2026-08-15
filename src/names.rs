@@ -1,13 +1,9 @@
 //! Naming a spawn.
 //!
 //! One string names the spawn, its branch and its worktree directory, so the
-//! things left on disk identify themselves. Branches outlive spawns — retiring a
-//! spawn leaves the branch — so these names get read months later while pruning:
-//! `spawn/a7f3` is unreadable by then, `spawn/add-retry-logic-a7f3` is not.
-//!
-//! The suffix is random rather than a counter because a counter needs state the
-//! app does not keep. It also means a path is never reused, so worktree metadata
-//! stranded by a crash never blocks anything.
+//! things left on disk identify themselves. The suffix is random rather than a
+//! counter, so a path is never reused and worktree metadata stranded by a
+//! crash never blocks anything.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,31 +27,13 @@ pub fn branch_name(spawn_name: &str) -> String {
     format!("spawn/{spawn_name}")
 }
 
-/// How many seeds this process has already handed out.
-///
-/// The clock and the process id are the same for two spawns started in the same
-/// breath — and one process now starts several at once, one straight after the
-/// other. Two spawns with the same name are two spawns wanting the same
-/// worktree path, which `git worktree add` would refuse: a refusal rather than
-/// damage, but a refusal for a reason nobody could act on. **The count is what
-/// differs between two spawns a clock too coarse to tell them apart would have
-/// named the same**, and it costs an atomic add.
-///
-/// It makes seeds distinct, not names: the suffix is four characters of a
-/// scrambled seed, so two distinct seeds can still land on the same name about
-/// once in 1.7 million. That is the collision the design already accepts — what
-/// this rules out is the *systematic* one, where a coarse clock names every
-/// spawn in a batch identically.
+/// How many seeds this process has already handed out — the one input that
+/// differs between two spawns started faster than the clock ticks. Without it
+/// a coarse clock would name every spawn in a batch identically.
 static HANDED_OUT: AtomicU64 = AtomicU64::new(0);
 
-/// A seed for [`spawn_name`], from the three things to hand that differ between
-/// two spawns: the clock, which process is asking, and how many it has asked
-/// for already.
-///
-/// The clock is taken as its two halves rather than as a count of nanoseconds,
-/// which would be a `u128` and would have to be cut down to fit. Seconds and
-/// sub-second nanoseconds are each already narrow enough to widen into a `u64`,
-/// so nothing is thrown away and nothing has to be justified.
+/// A seed for [`spawn_name`], from the three things that differ between two
+/// spawns: the clock, the process id, and how many seeds it has asked for.
 pub fn fresh_seed() -> u64 {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -66,10 +44,7 @@ pub fn fresh_seed() -> u64 {
 }
 
 /// The readable half of a name: the work description, as far as it fits.
-///
-/// Words are kept whole. A description that reaches the limit mid-word stops
-/// before it, because a truncated word reads as a typo rather than as a name cut
-/// short.
+/// Words are kept whole — a truncated word reads as a typo.
 fn slug(work: &str) -> String {
     let mut slug = String::new();
 
@@ -97,13 +72,8 @@ fn slug(work: &str) -> String {
     slug
 }
 
-/// The half that makes a name unique.
-///
-/// One scrambled byte per character, rather than repeatedly dividing the seed
-/// down: a byte widens into an index losslessly, so the arithmetic stays in the
-/// type it started in. The alphabet does not divide 256 evenly, so the first few
-/// characters are very slightly likelier than the rest — which costs a fraction
-/// of a bit across four characters and matters to nothing here, where the suffix
+/// The half that makes a name unique. The alphabet does not divide 256 evenly,
+/// so early characters are very slightly likelier — accepted, since the suffix
 /// only has to make paths distinct.
 fn suffix(seed: u64) -> String {
     scramble(seed)
@@ -114,10 +84,8 @@ fn suffix(seed: u64) -> String {
         .collect()
 }
 
-/// Spread a seed's bits about, so two spawns started a microsecond apart do not
-/// land on adjacent suffixes. This is [splitmix64], chosen because it is four
-/// lines and needs no dependency — it is not, and does not need to be,
-/// cryptographic.
+/// Spread a seed's bits so near seeds do not give adjacent suffixes. This is
+/// [splitmix64] — four lines, no dependency, not cryptographic.
 ///
 /// [splitmix64]: https://prng.di.unimi.it/splitmix64.c
 fn scramble(seed: u64) -> u64 {
@@ -179,9 +147,6 @@ mod tests {
         );
     }
 
-    /// Several spawns are started one straight after the other, and a clock
-    /// coarse enough to read the same twice would otherwise name them the same
-    /// — which is two spawns asking for one worktree path.
     #[test]
     fn two_spawns_started_in_the_same_breath_are_seeded_differently() {
         assert_ne!(fresh_seed(), fresh_seed());

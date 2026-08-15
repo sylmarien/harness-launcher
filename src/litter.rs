@@ -1,19 +1,11 @@
 //! What the app leaves behind, and what it finds.
 //!
-//! **Quitting kills nothing.** tmux outlives the app, and that default is kept
-//! deliberately: ending twenty agents mid-turn because somebody closed a viewer
-//! would be the most destructive thing this app could do, and it would foreclose
-//! the recovery a later tranche wants — there would be nothing left to recover.
-//!
-//! So litter is accepted. **Invisible litter is not**, and that is the whole of
-//! what this module is for. On the way out the app says what it is leaving; on
-//! the way in it says what it found. Neither is a feature: **nothing is adopted,
-//! restored or recovered.** A report is a statement about the world, and the run
-//! it belongs to carries on with an empty list either way.
-//!
-//! Both reports are the same look at the world, said two ways — which is why
-//! there is one type here and two sentences. The looking is [`Litter::surveyed`];
-//! everything else is pure.
+//! Quitting kills nothing, on purpose: ending agents mid-turn because somebody
+//! closed a viewer would be the most destructive thing this app could do. So
+//! litter is accepted — invisible litter is not. The app reports what it found
+//! at start-up and what it leaves at exit, and a report only states the world:
+//! nothing is adopted, restored or recovered. The looking is
+//! [`Litter::surveyed`]; everything else is pure.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +15,7 @@ use crate::worktrees;
 
 /// What the app has running and on disk, at one moment.
 pub struct Litter {
-    /// The spawns still running in the session they are windows of, or nothing
-    /// at all when there is no session — which is a machine that has not run
-    /// this since it last started.
+    /// The spawns still running, or `None` when there is no session at all.
     running: Option<Vec<String>>,
     /// Where the worktrees go.
     root: PathBuf,
@@ -34,14 +24,8 @@ pub struct Litter {
 }
 
 impl Litter {
-    /// Look at the world, and say what is there.
-    ///
-    /// **The only thing in this module that touches anything.** It asks tmux
-    /// what is running and reads what is under the worktree root, and it does
-    /// nothing else — no session is made, no pane is opened, nothing is
-    /// attached, nothing on disk is touched. That is what makes the reports
-    /// statements rather than features: the same call serves the way in and the
-    /// way out precisely because it has no side to take.
+    /// Look at the world, and say what is there — the only thing in this
+    /// module that touches anything, and it only reads.
     pub fn surveyed(server: &Server, root: &Path) -> Result<Self> {
         Ok(Self {
             running: server.running()?,
@@ -50,29 +34,11 @@ impl Litter {
         })
     }
 
-    /// What to say on the way out.
+    /// What to say at exit: quitting stopped nothing, what is still running,
+    /// and where the worktrees are.
     ///
-    /// **The report exists because the app is about to leave all of this
-    /// running**, so it says so first: quitting stopped nothing. Then the three
-    /// things somebody would need to go and deal with any of it — the session to
-    /// attach to, how much is in it, and where the worktrees are.
-    ///
-    /// **A claim about the act of leaving, not about the run.** "Nothing was
-    /// stopped" is false of any run where a spawn was retired, and loudest in
-    /// the run where every one of them was: the report would answer a screen
-    /// full of deliberate retirements by insisting none of them happened. What
-    /// quitting itself did is the promise being kept, it is true every time, and
-    /// it is the only one of the two the reader is about to act on.
-    ///
-    /// The worktrees are given as the root rather than named one by one. On the
-    /// way out the spawns are the ones this run started, so their names are
-    /// already on the screen that is about to close; what is worth carrying away
-    /// is where to look.
-    ///
-    /// **Leaving nothing running still says so**, and says it as "nothing"
-    /// rather than as a count of none: every spawn retired is an ordinary way to
-    /// finish, and "0 spawns are still running" reads like a tally where a
-    /// sentence belongs.
+    /// It claims only what quitting itself did — "nothing was stopped" would
+    /// be false of any run where a spawn was deliberately retired.
     pub fn leaving(&self) -> String {
         let root = self.root.display();
 
@@ -98,24 +64,12 @@ impl Litter {
         )
     }
 
-    /// What to say on the way in, or nothing at all when there is nothing to
-    /// say.
+    /// What to say at start-up, or `None` when there is nothing to say.
     ///
-    /// **Everything is named, and a count would not do.** The app has just
-    /// started and remembers nothing — that is the point of the report — so
-    /// somebody reading it needs the strings that will let them find what it is
-    /// talking about. A spawn, its branch and its worktree all carry the same
-    /// name, which is what makes this possible at all.
-    ///
-    /// **It ends by saying that none of it is adopted**, because the natural
-    /// reading of a list of running agents at start-up is that the app has
-    /// picked them up. It has not, it will not, and the list beside it is about
-    /// to be empty; leaving somebody to infer that from an empty list would be
-    /// the report creating the confusion it exists to prevent.
-    ///
-    /// Nothing found says nothing. A first run on a clean machine has no reason
-    /// to hear about the litter it has not made yet — and a session standing
-    /// empty is the app's own furniture rather than something left behind.
+    /// Everything is named — the app remembers nothing, so a count would leave
+    /// the reader unable to find any of it — and it ends by saying none of it
+    /// is adopted, because a list of running agents would otherwise read as
+    /// picked up.
     pub fn found(&self) -> Option<String> {
         let running: &[String] = self.running.as_deref().unwrap_or_default();
         if running.is_empty() && self.worktrees.is_empty() {
@@ -148,14 +102,8 @@ impl Litter {
     }
 }
 
-/// So many spawns still running in the session, said the one way.
-///
-/// **Both reports open on this clause**, and it is one fact said twice rather
-/// than two facts: how much is live, and which session it is live in. Written
-/// out once because the two are read minutes apart by the same person — the way
-/// in on the way in, the way out on the way out — and a count that pluralised
-/// differently, or a session named differently, would read as two different
-/// places.
+/// So many spawns still running in the session, phrased the same way in both
+/// reports.
 fn still_running(how_many: usize) -> String {
     format!(
         "{} still running in the tmux session `{}`",
@@ -164,40 +112,24 @@ fn still_running(how_many: usize) -> String {
     )
 }
 
-/// So many of a thing, said so that one of them is not "1 spawns".
-///
-/// The caller supplies both readings because agreement runs past the noun: it
-/// is "1 spawn **is** still running" against "2 spawns **are**", and a helper
-/// that only pluralised the noun would leave the verb wrong at every call site
-/// that needed one.
+/// So many of a thing, without "1 spawns". The caller supplies both readings
+/// because agreement runs past the noun ("1 spawn is" / "2 spawns are").
 fn counted(how_many: usize, one: &str, many: &str) -> String {
     let thing = if how_many == 1 { one } else { many };
 
     format!("{how_many} {thing}")
 }
 
-/// Something said on the way out of the scope it is in, however that scope is
-/// left.
-///
-/// **A value rather than a line at the end of a function**, because there is no
-/// single end to put that line at. From the moment the app has a session it has
-/// agents running that outlive it, and every way out from there leaves them
-/// running: the app quitting on purpose, a refusal on the way up with three of
-/// four spawns already started, or the app falling over. A line after the last
-/// of those covers exactly one, and the two it misses are the two nobody is
-/// expecting — which is precisely when a silent exit reads as *there was nothing
-/// to leave*.
-///
-/// It holds the saying rather than the sentence: a report taken when the guard
-/// was made would describe the world at the wrong moment, and the whole value of
-/// this one is that it is a look at the world taken on the way out.
+/// Something said when its scope is left, however it is left — an ordinary
+/// return, a refusal part-way, or a panic; a line at the end of a function
+/// covers only the first. It holds the saying rather than the sentence, so the
+/// report describes the world at the moment of leaving.
 pub struct Leaving<R: FnOnce()> {
-    /// Taken on the way out, which is the only time there is to use it.
     report: Option<R>,
 }
 
 impl<R: FnOnce()> Leaving<R> {
-    /// Arrange for this to be said on the way out, whichever way out it is.
+    /// Arrange for this to be said when the scope is left, however it is left.
     pub fn saying(report: R) -> Self {
         Self {
             report: Some(report),
@@ -227,15 +159,14 @@ mod tests {
     use crate::screen::Size;
     use crate::tmux::tests::PrivateTmux;
 
-    /// The shape a spawn's pane is born in. Nothing here looks at a screen; it
-    /// is only what a session has to be given to exist.
+    /// What a session has to be given to exist; nothing here looks at a screen.
     const SLOT: Size = Size {
         columns: 61,
         rows: 17,
     };
 
-    /// A look at the world that a test writes rather than takes, so the
-    /// sentences can be pinned without a tmux or a filesystem.
+    /// A survey a test writes rather than takes, so the sentences can be
+    /// pinned without a tmux or a filesystem.
     fn litter(running: Option<&[&str]>, worktrees: &[&str]) -> Litter {
         Litter {
             running: running.map(|names| names.iter().map(|n| (*n).to_string()).collect()),
@@ -244,11 +175,6 @@ mod tests {
         }
     }
 
-    /// The way in has a harder job than the way out: this app has just started
-    /// and remembers nothing, so a count would leave somebody with no way to
-    /// find what it is talking about. The artifacts name themselves — a spawn,
-    /// its branch and its worktree are all the same string — so the report
-    /// names them.
     #[test]
     fn the_way_in_names_what_it_found_and_says_none_of_it_is_taken_over() {
         let said = litter(
@@ -274,14 +200,6 @@ mod tests {
         );
     }
 
-    /// The two halves of a survey, taken from the real world rather than
-    /// written down: a real tmux holding a real running spawn, and a real
-    /// directory holding a worktree from some earlier run that nothing is
-    /// running for any more.
-    ///
-    /// The second one is the case that matters most on the way in — a spawn
-    /// whose session died with a reboot leaves its worktree behind, and that is
-    /// litter nothing else would ever mention.
     #[test]
     fn a_survey_reads_the_session_and_the_root_as_they_really_are() {
         let tmux = PrivateTmux::start("litter-surveys-the-world");
@@ -310,10 +228,6 @@ mod tests {
         );
     }
 
-    /// Quitting with nothing running — every spawn retired, or none ever
-    /// started. It is a real way to leave and the sentence has to read like
-    /// one: "0 spawns are still running" is a count where a plain "nothing is"
-    /// belongs, and it sits oddly beside the promise it is there to keep.
     #[test]
     fn leaving_nothing_running_reads_as_nothing_rather_than_as_a_count_of_none() {
         let said = litter(Some(&[]), &[]).leaving();
@@ -326,10 +240,6 @@ mod tests {
         );
     }
 
-    /// The commonest run there is, and it must be silent. **A session standing
-    /// empty is not litter** — it is the app's own furniture, made by the last
-    /// run and reused by this one, and reporting it would train somebody to
-    /// ignore the report that matters.
     #[test]
     fn a_machine_with_nothing_left_on_it_hears_nothing_on_the_way_in() {
         assert_eq!(
@@ -344,8 +254,6 @@ mod tests {
         );
     }
 
-    /// One of a thing is not "1 spawns". Cheap to get wrong and read by
-    /// somebody every single time they quit.
     #[test]
     fn one_of_a_thing_reads_as_one_of_a_thing() {
         let one = litter(Some(&["add-retry-logic-a7f3"]), &["add-retry-logic-a7f3"]);
@@ -361,8 +269,6 @@ mod tests {
         assert!(found.contains("1 worktree "), "{found}");
     }
 
-    /// What the acceptance criteria ask the way out to say, in order: the
-    /// holding session's name, how many spawns are live, and the worktree root.
     #[test]
     fn the_way_out_names_the_session_counts_the_spawns_and_says_where_the_worktrees_are() {
         let said = litter(
@@ -382,12 +288,6 @@ mod tests {
         );
     }
 
-    /// **The one thing the way out must not claim.** Retiring spawns with `F9`
-    /// is an ordinary way to spend a run, and a report answering a screenful of
-    /// deliberate retirements with "nothing was stopped" is false about the only
-    /// thing the reader watched happen — loudest in the run that retired every
-    /// one of them. What *quitting* did is the promise being kept, and it is the
-    /// only half of it that is true every time.
     #[test]
     fn the_way_out_claims_only_that_quitting_stopped_nothing() {
         for said in [
@@ -406,11 +306,6 @@ mod tests {
         }
     }
 
-    /// **The way out the report exists for is not the only way out there is.**
-    /// A refusal with spawns already started — the third of four failing to
-    /// start — leaves two agents running and a shell told nothing about them,
-    /// which is exactly the surprise the report is there to prevent. So it is
-    /// made on the way out of the scope rather than after the last thing in it.
     #[test]
     fn a_scope_left_by_a_refusal_still_says_what_is_being_left_behind() {
         let said = Cell::new(0);
@@ -432,9 +327,6 @@ mod tests {
         );
     }
 
-    /// And falling over is when somebody most needs telling that twenty agents
-    /// are still going: the app has just vanished from under them, and the one
-    /// thing that is *not* true is that it took the work with it.
     #[test]
     fn a_scope_left_by_a_crash_still_says_what_is_being_left_behind() {
         let said = Cell::new(0);
@@ -453,8 +345,6 @@ mod tests {
         );
     }
 
-    /// Said once, not once per way out: an ordinary return is a way out too, and
-    /// a report made twice would have somebody looking for a second session.
     #[test]
     fn a_scope_left_the_ordinary_way_says_it_once() {
         let said = Cell::new(0);

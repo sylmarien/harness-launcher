@@ -1,97 +1,60 @@
-//! The scaffolding the app draws its own screen with.
+//! The scaffolding the app draws its own screen with: marks, styles, text
+//! layout, and column behaviour (eliding, scrolling, footers).
 //!
-//! Two kinds of thing, and they belong together because the same two callers
-//! need both. **How it reads** — the marks, the gutter, the ways of emphasising.
-//! **What a column does** — cut text to the width it turned out to have, keep
-//! what you are on in view, and carry a footer that is all its rows or none.
-//!
-//! The list and the draft form are each one of these columns, which is why this
-//! is shared rather than a helper inside either. Written twice they would drift,
-//! and they had already begun to: a selection mark decided in two places is two
-//! things that come to disagree, and the two footers had reached the point where
-//! one cut its lines and the other let them run off the edge.
-//!
-//! Nothing a spawn drew passes through here. This is only ever the app writing
+//! Shared between the list and the draft form so the two cannot drift.
+//! Nothing a spawn drew passes through here — this is only the app writing
 //! about itself.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// The mark in the gutter of whatever the keyboard is on.
+/// The mark in the gutter of the row the keyboard is on.
 pub const SELECTED: &str = "▍";
 
-/// The mark that says text was cut, and it costs a cell of what it cuts.
+/// The mark appended to text that was cut, spending one cell of the cut.
 pub const ELLIPSIS: char = '…';
 
-/// How a heading reads: a repository's name, the word above the list, the name
-/// of a control in the form.
+/// The style for headings: repository names, section titles, form controls.
 pub const HEADING: Style = Style::new().add_modifier(Modifier::BOLD);
 
-/// How everything the eye should slide over reads — the detail under the
-/// selected row, and the lines saying what the keyboard does.
+/// The style for de-emphasised text: details and keyboard hints.
 pub const DIM: Style = Style::new().add_modifier(Modifier::DIM);
 
-/// The colour the app says *the keyboard is on this one* in. A colour of its
-/// own, because it says something about the app rather than about a spawn.
-///
-/// Written once and read two ways — as the mark in a form's gutter, and as the
-/// band under a row of the list — so the two can never come to disagree about
-/// what being selected looks like.
+/// The selection colour, defined once so the gutter mark and the band can
+/// never disagree about what being selected looks like.
 const SELECTION_COLOUR: Color = Color::Cyan;
 
 /// How the mark in the gutter reads where the row itself is not painted.
 pub const SELECTION: Style = Style::new().fg(SELECTION_COLOUR);
 
-/// How a row the keyboard is on reads: black on a band, which the row is then
-/// padded out to the full width of to make it a band rather than a highlight.
+/// The style of a selected row: black on a full-width band.
 ///
-/// **The one place the app names both colours**, and it is the one place it can:
-/// everywhere else it puts a colour on the user's own background and has to
-/// leave that background alone, so black would be a guess about a theme it
-/// cannot see. Here the background is the app's own, so what reads on top of it
-/// is arithmetic rather than a guess.
-///
-/// `alarmed` is the row being one the app is admitting something about, and
-/// [`AMBER`] is the whole of the rule: it is the colour reserved for the app
-/// admitting things and used for nothing else, so **whatever the caller has
-/// already drawn in amber is what is being admitted**. The band takes amber
-/// rather than the selection's colour, so the admission survives the row being
-/// selected. Listing the states that qualify would be a second answer to a
-/// settled question, and the two would come apart the first time a state was
-/// added to one of them.
+/// Naming black is safe only here, because the app paints the background
+/// itself; everywhere else the user's theme is unknown and left alone.
+/// An `alarmed` row's band is [`AMBER`] so the warning survives selection.
 pub fn band(alarmed: bool) -> Style {
     Style::new()
         .bg(if alarmed { AMBER } else { SELECTION_COLOUR })
         .fg(Color::Black)
 }
 
-/// The colour reserved for the app admitting something: that it cannot tell
-/// what a spawn is doing, or that it could not do what it was asked.
-///
-/// One colour for both, because they are one thing from where the user sits —
-/// the app saying *this one is on you*. Two would be two things to learn.
+/// The colour reserved for the app reporting a problem of its own: a spawn it
+/// cannot account for, or something it was asked to do and could not.
 pub const AMBER: Color = Color::Yellow;
 
-/// The gutter at the front of a row or a heading: the mark when the keyboard is
-/// on it, and the space it would have taken when it is not.
+/// The gutter cell: the selection mark, or a space so text beside it does not
+/// shift as the selection moves.
 ///
-/// A space rather than nothing, so what is beside it does not shift sideways as
-/// the selection arrives and leaves.
-///
-/// **How it reads is the row's rather than the gutter's**, because a row can be
-/// painted: a mark keeping its own cyan on a cyan [`band`] would be the one cell
-/// of the row that disappeared. A column that draws no band passes [`SELECTION`]
-/// and gets what this always did.
+/// The style is the caller's: a cyan mark on a cyan [`band`] would vanish, so
+/// a painted row passes its own style; columns with no band pass [`SELECTION`].
 pub fn gutter(on_it: bool, how_it_reads: Style) -> Span<'static> {
     Span::styled(if on_it { SELECTED } else { " " }, how_it_reads)
 }
 
-/// `text`, cut to fit, ending in the mark that says it was cut.
+/// `text`, cut to `cells`, ending in [`ELLIPSIS`] when it was cut.
 ///
-/// Counted in characters, which is what the app writes about itself: a spawn's
-/// name is a slug the app made itself, and a branch and a worktree path are
-/// built from it. Text with wide characters in it will lose a cell of its cut,
-/// and nothing else.
+/// Counted in characters, not display cells: text with wide characters may
+/// overrun its cut by a cell.
 pub fn elided(text: &str, cells: usize) -> String {
     if text.chars().count() <= cells {
         return text.to_string();
@@ -106,24 +69,16 @@ pub fn elided(text: &str, cells: usize) -> String {
         .collect()
 }
 
-/// How far down a column has to be scrolled for `selected` to be on it.
+/// How far down a column has to be scrolled for `selected` to be on it: only
+/// far enough, following the selection one line at a time.
 ///
-/// **Only far enough, and only when there is no other way.** The column sits at
-/// its top until the selection would fall off the bottom, and then follows it
-/// one line at a time — so a heading stays where it was for as long as it
-/// possibly can, and nothing moves under the eye that did not have to.
+/// This is not general scrolling — reaching content the selection is not on,
+/// on a column longer than the screen, is the open question recorded in
+/// `docs/developers/components/the-screen.md`.
 ///
-/// This is not scrolling. Reaching something the selection is not on, on a
-/// column longer than the screen, is the open question
-/// `docs/developers/components/the-screen.md` records and the scale pass owns.
-/// What is settled here is narrower and was asked for:
-/// a selection that moves is a selection you can see.
-///
-/// `selected` is the first and last line the selected thing occupies, which is
-/// more than one line for a form control with a paragraph in it. A row of the
-/// list is one line and gives the same number twice; the pair is still what this
-/// takes, because the two columns share it. Where even the whole of a selection
-/// will not fit, its first line wins.
+/// `selected` is the first and last line the selected thing occupies (the
+/// same line twice for a one-line row). When even the whole selection will
+/// not fit, its first line wins.
 pub fn scroll_offset(selected: Option<(usize, usize)>, height: usize) -> u16 {
     let Some((first, last)) = selected else {
         return 0;
@@ -135,41 +90,21 @@ pub fn scroll_offset(selected: Option<(usize, usize)>, height: usize) -> u16 {
     u16::try_from(offset).unwrap_or(u16::MAX)
 }
 
-/// `text`, broken across lines of at most `cells`, on the spaces in it.
-///
-/// For the things the app writes that are prose rather than names: the sentence
-/// saying why a spawn is `unknown`, the one a retirement carries, and the one
-/// saying why a draft could not be started. None of them is a sentence the app
-/// wrote itself — they carry git's words, or the harness's — and a sentence cut
-/// at twenty-seven columns says nothing. A word too long for a line of its own
-/// is cut, which is the only way it ends.
-///
-/// A column with no room at all gets no lines rather than a blank one per word:
-/// they would show as nothing and still push everything under them down.
+/// `text`, wrapped on its spaces into lines of at most `cells` — for prose.
+/// A word too long for a line of its own is cut. Zero width yields no lines
+/// rather than a blank line per word.
 pub fn wrapped(text: &str, cells: usize) -> Vec<String> {
     laid_out(text, cells, |word, cells| vec![elided(word, cells)])
 }
 
-/// `text`, broken across lines of at most `cells` — on its spaces where it can
-/// be, and through a word that does not fit where it cannot.
-///
-/// For the one thing the app writes that has to survive being written down: the
-/// record of what a creation was about to do, which names a worktree and a
-/// branch. Everything else the app cuts, it cuts because the rest of it is not
-/// worth a second row — but **a path cut with an ellipsis is a path you cannot
-/// go and look at**, and going and looking is the whole reason it is written
-/// down before it is made.
+/// Like [`wrapped`], but a word too long for a line is split across lines
+/// rather than cut — for paths, which must survive whole to be followed.
 pub fn broken(text: &str, cells: usize) -> Vec<String> {
     laid_out(text, cells, pieces)
 }
 
-/// Words onto lines of at most `cells`, with `too_long` saying what becomes of
-/// one that will not fit on a line of its own.
-///
-/// That is the whole of the difference between the two above, and the reason
-/// they are one function underneath: laying words onto lines is the same job
-/// either way, and written twice it would be two things that came to disagree
-/// about a space.
+/// Words onto lines of at most `cells`; `too_long` decides what becomes of a
+/// word that will not fit on a line of its own.
 fn laid_out(
     text: &str,
     cells: usize,
@@ -197,8 +132,8 @@ fn laid_out(
     lines
 }
 
-/// One word, as the pieces it goes onto lines as: itself when it fits, and
-/// whatever the caller does with it when it does not.
+/// One word as its line pieces: itself when it fits, `too_long`'s result
+/// otherwise.
 fn whole(word: &str, cells: usize, too_long: &impl Fn(&str, usize) -> Vec<String>) -> Vec<String> {
     if word.chars().count() <= cells {
         return vec![word.to_string()];
@@ -207,8 +142,7 @@ fn whole(word: &str, cells: usize, too_long: &impl Fn(&str, usize) -> Vec<String
     too_long(word, cells)
 }
 
-/// `word`, in pieces of at most `cells` characters — which is what a word too
-/// long for a line of its own becomes when none of it may be lost.
+/// `word`, split into pieces of at most `cells` characters.
 fn pieces(word: &str, cells: usize) -> Vec<String> {
     let characters: Vec<char> = word.chars().collect();
 
@@ -218,18 +152,12 @@ fn pieces(word: &str, cells: usize) -> Vec<String> {
         .collect()
 }
 
-/// What the foot of a column says the keyboard does.
-///
-/// There are two — under the list, and under a draft's form — and they behave
-/// the same way: dim, anchored to the bottom so they stay where the eye last
-/// found them, cut rather than wrapped, and **given back to the content
-/// entirely when there is not room for both**.
+/// A column's keyboard hints: dim, anchored to the bottom, cut rather than
+/// wrapped, and shown all-or-nothing.
 pub struct Footer {
     /// What it says, one line per row.
     says: &'static [&'static str],
-    /// The shortest column that can still spare the rows. It differs between
-    /// the two: how much content has to survive before saying what the keyboard
-    /// does is worth a row is a judgement about that column, not about footers.
+    /// The shortest column that can still spare the rows.
     room: u16,
 }
 
@@ -240,9 +168,6 @@ impl Footer {
     }
 
     /// How many rows it takes on a column this tall: all of them, or none.
-    ///
-    /// Never some. A footer cut off half way through says less than no footer
-    /// at all, and the rows it would have taken are the content's.
     pub fn rows(&self, height: u16) -> u16 {
         if height < self.room {
             return 0;
@@ -312,8 +237,6 @@ mod tests {
 
     #[test]
     fn what_is_selected_wins_over_the_detail_hanging_off_it() {
-        // Four lines of selection in a column three high: the first line of it
-        // is what has to be on screen.
         assert_eq!(scroll_offset(Some((5, 8)), 3), 5);
     }
 
@@ -367,8 +290,6 @@ mod tests {
         assert_eq!(gutter(true, SELECTION).content, SELECTED);
     }
 
-    /// The two things a band has to be: a background the row is painted with,
-    /// and the admission surviving the row being selected.
     #[test]
     fn a_band_is_a_background_and_it_is_amber_when_the_app_is_admitting_something() {
         assert_eq!(band(false).bg, Some(SELECTION_COLOUR));

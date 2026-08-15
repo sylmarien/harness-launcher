@@ -1,14 +1,9 @@
 //! Where the app puts the worktrees it creates.
 //!
-//! One app-owned root, outside every repository. Inside a repository they would
-//! show up as untracked files in the user's own `git status`, and the only fix
-//! would be editing *their* `.gitignore` — writing into a project the app does
-//! not own. A directory the app owns also makes leftovers findable.
-//!
-//! *Accepted cost:* the worktrees are not where a git-literate user would think
-//! to look for them.
-//!
-//! The root is deliberately not configurable.
+//! One app-owned root, outside every repository — inside one they would show
+//! up as untracked files in the user's own `git status`. Deliberately not
+//! configurable. Accepted cost: not where a git-literate user would think to
+//! look.
 
 use std::env;
 use std::ffi::OsString;
@@ -22,14 +17,9 @@ pub fn root() -> Result<PathBuf> {
     root_from(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
 }
 
-/// Make the root, and return where a spawn's worktree should go.
-///
-/// The directory itself is left for `git worktree add` to create: git refuses to
-/// use a path that already exists, and that refusal is worth keeping.
-///
-/// The root is passed in rather than resolved here, because it is resolved once
-/// — before the screen is taken over, where a machine with nowhere to put
-/// worktrees can still be told so on a shell.
+/// Make the root, and return where a spawn's worktree should go. The worktree
+/// directory itself is left for `git worktree add`, which refuses a path that
+/// already exists — a refusal worth keeping.
 pub fn prepare(root: &Path, spawn_name: &str) -> Result<PathBuf> {
     fs::create_dir_all(root).map_err(|error| {
         Error::new(format!(
@@ -41,30 +31,11 @@ pub fn prepare(root: &Path, spawn_name: &str) -> Result<PathBuf> {
     Ok(root.join(spawn_name))
 }
 
-/// What the root is holding, by name.
+/// What the root is holding, by name, sorted.
 ///
-/// A worktree names itself — the same string as the spawn it belongs to and the
-/// branch it is on — so this is enough for a report to say which piece of work
-/// each leftover came from, rather than only how many there are.
-///
-/// **A root that is not there is nothing found, not a problem.** The app makes
-/// it when it first needs one, so a machine that has never started a spawn has
-/// nothing to report and no reason to hear about it.
-///
-/// **A root that cannot be read is also nothing found**, and that is the one
-/// judgement call here. The alternative is refusing to start the app because a
-/// directory listing failed, which trades a report nobody can act on for a
-/// refusal that stops the work — and this is a report, not a check.
-///
-/// **Directories only, because a worktree is one.** The root is an ordinary
-/// place on disk that anything may leave a file in — an editor's swap file, a
-/// note, a tarball somebody dropped there — and a report that named one as a
-/// worktree would send its reader looking for a checkout of work that was never
-/// started. What cannot be read as a directory at all is skipped for the same
-/// reason: this names leftovers, and a maybe is not a name.
-///
-/// Sorted, so the same leftovers read the same way twice: `read_dir` is in
-/// whatever order the filesystem keeps.
+/// A missing or unreadable root is nothing found, not a problem — this is a
+/// report, not a check. Directories only: a stray file under the root is not a
+/// worktree.
 pub fn under(root: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
@@ -136,8 +107,6 @@ mod tests {
         assert!(root_from(None, None).is_err());
     }
 
-    /// The worktrees name themselves — the same string as the spawn and its
-    /// branch — which is what lets a report say more than "there is stuff here".
     #[test]
     fn what_is_left_under_the_root_is_named() {
         let somewhere = tempfile::tempdir().unwrap();
@@ -152,10 +121,6 @@ mod tests {
         );
     }
 
-    /// **A worktree is a directory**, and the root is somewhere anything may
-    /// leave a file. Naming a stray one as a worktree sends the reader looking
-    /// for a checkout of work nobody ever started — which is the report
-    /// inventing exactly the confusion it exists to clear up.
     #[test]
     fn a_stray_file_under_the_root_is_not_read_as_a_worktree() {
         let somewhere = tempfile::tempdir().unwrap();
@@ -170,8 +135,6 @@ mod tests {
         );
     }
 
-    /// The first run on a machine, where the root does not exist yet: nothing
-    /// found, and nothing to say about it.
     #[test]
     fn a_root_that_was_never_made_is_holding_nothing() {
         let somewhere = tempfile::tempdir().unwrap();

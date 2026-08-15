@@ -1,42 +1,12 @@
 //! A draft: a spawn somebody is still writing.
 //!
-//! **A draft is state in the app.** Not a pane, not a process, not a second mode
-//! of this binary and nothing on disk — a record in a list, edited by the
-//! keyboard and drawn into the slot like anything else. That is what makes
-//! several of them free: a `Vec` of them costs what a `Vec` costs.
-//!
-//! **Composing is not a modal.** A draft takes the slot when it is selected and
-//! sits in the list when it is not, so you can walk away from a half-written
-//! paragraph, deal with a spawn that stopped, and come back to it exactly as you
-//! left it — the text, the caret, and which field the keyboard was in. Nothing
-//! about it hides the list, which is the rule the whole product rests on.
-//!
-//! **The form never learns what any of the choices mean.** It is handed titled
-//! lists of labels by the harness and asks *"which of these?"*; it does not know
-//! that one of them is about models, what an id says, or how many lists there
-//! are. A list that comes back with nothing in it is not a control drawn empty —
-//! it is a control that does not exist, which is what lets a harness offering no
-//! such choice be a harness rather than a special case.
-//!
-//! **Starting one is the only thing in the app that creates anything.** The
-//! draft hands over what was typed and then narrates: what it is about to do
-//! before it does it, so a creation that dies half way leaves a record of the
-//! worktree it made rather than a mystery. On success the row goes and a spawn
-//! row takes its place; **on failure it is a draft again with the text
-//! untouched**, which is what makes *refuse rather than guess* affordable — a
-//! refusal never costs somebody the paragraph they just wrote. The making
-//! itself is [`crate::creation`]'s; what is here is the asking and the saying.
-//!
-//! **Throwing one away is the counterpart, and it is deliberately not
-//! retirement.** A draft has made nothing — no worktree, no branch, nothing on
-//! disk, no process doing work — so there is no order to take it down in, no
-//! cleanliness to check and nothing to refuse: it is a record leaving a list,
-//! and it costs nothing but the words. What it costs is the words, though, and
-//! they exist nowhere else — so **it is the one thing in the app that asks
-//! first**. The first press is the question and any other key answers it *no*.
-//! The single exception is a draft a spawn is already being made from, which is
-//! the one moment a draft owns something: it refuses until the creation stops,
-//! because its record is the only thing saying what that creation has made.
+//! A draft is app state — a record in a list, not a pane, not a process,
+//! nothing on disk. Discarding one destroys text that exists nowhere else, so
+//! it is the one thing in the app that asks first: the first press of the key
+//! is the question, and any key that is not the answer answers no. The one
+//! refusal: a draft a spawn is currently being made from cannot be discarded
+//! until the creation stops, because its record is the only thing saying what
+//! that creation has made. See docs/developers/components/drafts-and-creation.md.
 
 use std::path::PathBuf;
 
@@ -57,18 +27,15 @@ const TITLE: &str = "NEW SPAWN";
 /// What the list calls a draft nothing has been typed into yet.
 const UNTITLED: &str = "a new spawn";
 
-/// What the heading over the repository field says.
 const REPOSITORY: &str = "Repository";
 
-/// What the heading over the description says.
 const WORK: &str = "Work";
 
 /// What the form calls the block a creation writes into.
 const STARTING: &str = "STARTING";
 
 /// What it calls that block once the creation has stopped without starting
-/// anything. A heading rather than only a colour: the difference between *this
-/// is happening* and *this did not happen* is the whole of what the block says.
+/// anything.
 const NOT_STARTED: &str = "NOT STARTED";
 
 /// What the form calls the block that asks whether to throw the draft away.
@@ -79,14 +46,8 @@ const NOWHERE_ELSE: &str = "what is typed here exists nowhere else, and there is
                             no branch and no session to lose with it — only the words";
 
 /// What it says instead when a creation stopped after it had already made
-/// something.
-///
-/// **The one thing throwing a draft away can leave behind**, and the question is
-/// where it is said: the record above names the worktree, and this run is the
-/// last thing that will mention it — until the app is started again and reports
-/// what it found under the worktree root. Litter is accepted; *invisible* litter
-/// is not, and a question claiming there was nothing to lose is exactly how this
-/// would have become invisible.
+/// something. Accepted cost: the worktree is left behind — but named here and
+/// reported again under the worktree root on the next start, never invisible.
 const AND_WHAT_WAS_MADE: &str = "the words go. What the record above says was already made does \
                                  not — it stays where the record says it is, and nothing in this \
                                  run will mention it again";
@@ -107,33 +68,16 @@ const MISSING_REPOSITORY: &str =
 const MISSING_WORK: &str =
     "it does not say what the work is, which is what a spawn is started with";
 
-/// How far a control's body sits from the left: one cell for the gutter the
-/// keyboard's mark goes in, and one more so the text sits inside its heading.
+/// How far a control's body sits from the left: one cell for the keyboard's
+/// gutter mark, one more so the text sits inside its heading.
 const INDENT: usize = 2;
 
-/// The mark against the option a list has settled on.
-///
-/// A shape rather than a colour alone, for the reason the list's statuses are
-/// one: a form read without colour still has to say which option it will use.
+/// The mark against the picked option. A shape rather than a colour alone, so
+/// the form reads without colour.
 const PICKED: &str = "› ";
 
-/// What the foot of the form says the keyboard does.
-///
-/// All three are worth saying. `Tab` is the only way around the form and
-/// nothing on screen implies it; the key that starts it is the only thing in
-/// the app that creates anything, and there is nowhere else to learn it; and
-/// that the list's own keys still work is the promise the product rests on,
-/// where a full-height form is exactly the place somebody would assume they had
-/// been taken somewhere modal.
-///
-/// **The key that throws it away is learnt here**, because here is where a
-/// draft is: the list's footer is about spawns, and a draft's own keys belong
-/// under its own form. It says that it asks first, because that is what makes it
-/// safe to press and the reason it can sit beside the key that starts one.
-///
-/// The shortest form that can still spare it four rows is ten: below that
-/// there is not room for a heading, a field and a list of choices, which is the
-/// least of the form worth showing.
+/// What the foot of the form says the keyboard does while it is being written.
+/// Ten rows is the shortest form worth showing it on.
 const HINT: Footer = Footer::new(
     &[
         "Tab moves between fields",
@@ -144,53 +88,24 @@ const HINT: Footer = Footer::new(
     10,
 );
 
-/// What it says while it is waiting to be told whether to throw the draft away.
-///
-/// Nothing else, because nothing else is what the keyboard is doing: every key
-/// on it that does anything at all is now one of two answers. It says which key
-/// is *yes* and leaves the rest of the keyboard as *no*, rather than naming a
-/// second key — a question with two keys to learn is one somebody answers by
-/// pressing whichever they half-remember.
-///
-/// **It promises what the app honours, and no more.** "Anything else keeps it"
-/// would be false on screen: a key the app has no meaning for — `Esc`, `F1`,
-/// `F4` — leaves the question standing rather than answering it, so a footer
-/// saying otherwise teaches somebody to press `Esc` and walk away from a
-/// question that is still up. Typing and moving away are the two that really do
-/// take it back, and they are the two anybody reaches for.
-///
-/// Its column has to be eight rows for the same reason [`HINT`]'s has to be ten:
-/// six rows are the least of the form worth showing, and the footer's own lines
-/// come on top of them.
+/// What it says while the discard question is standing. It promises only what
+/// the app honours: a key with no meaning here (`Esc`, `F1`) leaves the
+/// question standing, so it does not claim "anything else keeps it".
 const WHILE_ASKING: Footer = Footer::new(
     &["F3 again discards it", "Typing or moving away keeps it"],
     8,
 );
 
 /// What it says instead while the spawn is being made.
-///
-/// Nothing about moving around a form, because nothing typed into it would go
-/// anywhere: the text is being used. What is still true is the thing worth
-/// saying — walking away does not stop it, which is the same promise the list
-/// makes about quitting.
-///
-/// Seven rows for its one line, by the same arithmetic: six of content, one of
-/// footer.
 const WHILE_STARTING: Footer = Footer::new(&["F6 / F7 leave it — it carries on"], 7);
 
-/// Which draft.
-///
-/// A count rather than a name: a draft has nothing on disk to identify itself
-/// by, and a name taken from what has been typed would change under the
-/// selection as it was typed.
+/// Which draft. A count rather than a name: a draft has nothing on disk to
+/// identify itself by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Id(u64);
 
-/// What the keyboard asked of a draft.
-///
-/// Which key is which is settled where every other key is ([`crate::app`]);
-/// what a key *means* depends on the control the keyboard is in, and that is
-/// settled here.
+/// What the keyboard asked of a draft. Which key is which is settled in
+/// [`crate::app`]; what a key means here depends on the control it lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edit {
     /// A character, at the caret.
@@ -221,15 +136,12 @@ pub enum Edit {
 
 /// Every draft in flight, and where the next one's identity comes from.
 pub struct Drafts {
-    /// What the harness offers. Asked once: the lists do not change between
-    /// drafts, and asking per draft would invite two forms in one session
-    /// offering different things.
+    /// What the harness offers, asked once so every draft offers the same.
     choices: Vec<Choices>,
     /// Every draft there is, in the order they were started.
     all: Vec<Draft>,
-    /// How many have ever been started. It only counts up, so an identity is
-    /// never handed out twice — including to a draft that replaces one thrown
-    /// away.
+    /// How many have ever been started. Only counts up, so an identity is
+    /// never handed out twice.
     started: u64,
 }
 
@@ -262,21 +174,15 @@ impl Drafts {
         self.all.iter().find(|draft| draft.id == id)
     }
 
-    /// Do to a draft what the keyboard asked.
-    ///
-    /// A draft that is not here is not an error: what the selection is on and
-    /// what drafts exist are settled separately, so a keystroke aimed at one
-    /// that has gone should do nothing rather than something.
+    /// Do to a draft what the keyboard asked. A draft that has gone is not an
+    /// error: the keystroke does nothing.
     pub fn edit(&mut self, id: Id, edit: Edit) {
         self.doing_to(id, |draft| draft.edited(edit));
     }
 
-    /// Ask for a draft to be made into a spawn, and say what to make.
-    ///
-    /// Nothing at all when there is nothing to make: a draft already being made
-    /// is not started twice, and one that has not said enough refuses **in
-    /// place**, which is to say on its own row, with every character of what
-    /// was typed exactly where it was.
+    /// Ask for a draft to be made into a spawn, and say what to make. Nothing
+    /// when there is nothing to make: a draft already being made is not started
+    /// twice, and one that has not said enough refuses in place, text untouched.
     pub fn submit(&mut self, id: Id) -> Option<Wanted> {
         self.all
             .iter_mut()
@@ -294,13 +200,8 @@ impl Drafts {
         self.doing_to(id, |draft| draft.failed(why));
     }
 
-    /// Ask for a draft to be thrown away, and say whether it went.
-    ///
-    /// **It asks first, and the asking is the first press of the key.** Nothing
-    /// else in the app destroys something that exists nowhere else: a spawn's
-    /// work is on a branch and a refusal is what protects it, where a draft is a
-    /// paragraph somebody typed and there is nothing to refuse. So the answer to
-    /// the first press is the question, and the second press is the answer.
+    /// Ask for a draft to be thrown away, and say whether it went. The first
+    /// press is the question; the second is the answer.
     pub fn discarded(&mut self, id: Id) -> bool {
         if !self
             .all
@@ -315,14 +216,8 @@ impl Drafts {
         true
     }
 
-    /// Take back every question that has been asked about throwing a draft
-    /// away.
-    ///
-    /// Every one rather than a named one, because a question is not a thing to
-    /// keep track of: it is answered *no* by anything at all that is not the
-    /// answer, so the app takes them all back rather than working out which one
-    /// the keystroke was near. A draft with no question standing is untouched by
-    /// this.
+    /// Take back every standing discard question. Every one rather than a named
+    /// one: any keystroke that is not the answer answers no.
     pub fn take_back_every_question(&mut self) {
         for draft in &mut self.all {
             draft.discarding = None;
@@ -330,20 +225,12 @@ impl Drafts {
     }
 
     /// Let go of a draft that has become a spawn.
-    ///
-    /// The row does not become the spawn's row so much as make way for it: the
-    /// spawn is listed under the repository it was started against, which is
-    /// somewhere a draft — which has not chosen one until it is typed — could
-    /// never have been.
     pub fn finished(&mut self, id: Id) {
         self.all.retain(|draft| draft.id != id);
     }
 
-    /// Do something to one draft, if it is still here.
-    ///
-    /// Everything that happens to a draft after it is submitted arrives from
-    /// somewhere else — a thread, a frame later — so *the draft has gone* is an
-    /// ordinary thing for any of it to find, not an error.
+    /// Do something to one draft, if it is still here. Post-submit events
+    /// arrive from another thread, so a draft that has gone is ordinary.
     fn doing_to(&mut self, id: Id, what: impl FnOnce(&mut Draft)) {
         if let Some(draft) = self.all.iter_mut().find(|draft| draft.id == id) {
             what(draft);
@@ -371,12 +258,6 @@ pub struct Draft {
 }
 
 /// How far the app has got with a request to throw a draft away.
-///
-/// **A question rather than an act**, which is what makes it a state at all:
-/// everywhere else in the app a key does what it says, and here the first press
-/// only asks. The second shape is the one case where the answer cannot be *yes*
-/// yet, and it is a state for the same reason — the draft has to be able to say
-/// so on screen rather than the key appearing to do nothing.
 enum Discarding {
     /// Asked, and waiting for the answer.
     Asked,
@@ -384,16 +265,11 @@ enum Discarding {
     Refused,
 }
 
-/// What a creation has said about a draft it was asked to make.
-///
-/// The three states of a draft are this field's three shapes, which is why it
-/// is one field rather than a flag and a list that could disagree: **nothing**
-/// is a draft being written, **something with no trouble in it** is one being
-/// made, and **something with trouble** is one that stopped and is being
-/// written again.
+/// What a creation has said about a draft it was asked to make. The draft's
+/// three states are this one field's shapes: absent is a draft being written,
+/// no trouble is one being made, trouble is one that stopped.
 struct Progress {
-    /// What has been done, or attempted — each line written before the step it
-    /// describes was tried.
+    /// What has been done or attempted, each line written before it was tried.
     steps: Vec<String>,
     /// Why it stopped, when it did.
     trouble: Option<String>,
@@ -409,10 +285,6 @@ impl Progress {
     }
 
     /// One that never started at all, and why.
-    ///
-    /// For what the form can settle itself — a draft that has not said which
-    /// repository, or what the work is. Nothing was attempted, so there is
-    /// nothing to record but the refusal.
     fn refused(why: &str) -> Self {
         Self {
             steps: Vec::new(),
@@ -422,12 +294,8 @@ impl Progress {
 }
 
 impl Draft {
-    /// A blank draft offering these choices.
-    ///
-    /// **A list with nothing in it is dropped here**, so an empty control cannot
-    /// be drawn, cannot be reached by the keyboard, and does not exist to be got
-    /// wrong later. Leaving it out only at the point of drawing would keep a
-    /// control the form never shows.
+    /// A blank draft offering these choices. A list with nothing in it is
+    /// dropped here, so an empty control never exists at all.
     fn new(id: Id, choices: &[Choices]) -> Self {
         Self {
             id,
@@ -446,9 +314,6 @@ impl Draft {
     }
 
     /// Whether it was started and could not be.
-    ///
-    /// One of the two things the list draws its mark from — see [`Draft::
-    /// starting`] for why the list is told at all.
     pub fn stopped(&self) -> bool {
         self.progress
             .as_ref()
@@ -456,23 +321,14 @@ impl Draft {
     }
 
     /// Whether a spawn is being made from it right now.
-    ///
-    /// Asked by everything that has to behave differently while it is: the form
-    /// draws its record, the keyboard is shut out of it, and the list's row
-    /// says so with a mark of its own. *What* the creation is doing is a
-    /// sentence and stays in the form; that it is happening at all is one
-    /// character, and one character is what a row has.
     pub fn starting(&self) -> bool {
         self.progress
             .as_ref()
             .is_some_and(|progress| progress.trouble.is_none())
     }
 
-    /// Hand over what was typed, so a spawn can be made from it.
-    ///
-    /// The two fields are the two things nothing else can supply; the answers
-    /// go as the ids they came in as, because the form was never told what any
-    /// of them means and is not about to start pretending it knows.
+    /// Hand over what was typed, so a spawn can be made from it. The answers
+    /// go as the ids they came in as; the form never learnt what they mean.
     fn submitted(&mut self) -> Option<Wanted> {
         if self.starting() {
             return None;
@@ -500,24 +356,16 @@ impl Draft {
         })
     }
 
-    /// Write down what the creation is about to do.
-    ///
-    /// Kept even once the next step is written: the whole point of saying it
-    /// beforehand is that what a creation *got as far as* survives it stopping.
+    /// Write down what the creation is about to do. Every step is kept, so
+    /// what a creation got as far as survives it stopping.
     fn doing(&mut self, step: String) {
         if let Some(progress) = &mut self.progress {
             progress.steps.push(step);
         }
     }
 
-    /// Say the creation stopped, and give the draft back to the keyboard.
-    ///
-    /// **Including any refusal it was carrying.** A draft refuses to be thrown
-    /// away only for as long as a spawn is being made from it; once that stops,
-    /// the sentence saying so is about nothing that is happening. Left standing
-    /// it would tell the reader a creation is running, keep the caret away from
-    /// a form that is taking keys again, and spend the next character typed on a
-    /// question nobody is being asked.
+    /// Say the creation stopped, and give the draft back to the keyboard —
+    /// clearing any discard refusal, which was only about the running creation.
     fn failed(&mut self, why: String) {
         self.discarding = None;
         match &mut self.progress {
@@ -526,16 +374,11 @@ impl Draft {
         }
     }
 
-    /// Ask for it to be thrown away, and say whether it goes.
-    ///
-    /// The first ask is the question; the second is the answer to it.
+    /// Ask for it to be thrown away, and say whether it goes. The first ask is
+    /// the question; the second is the answer.
     fn discarded(&mut self) -> bool {
-        // **The one draft that owns something.** A creation is on a thread of
-        // its own, it cannot be called back, and the draft's record is the only
-        // thing on screen naming the worktree it is making — so throwing it away
-        // would orphan the worktree and the sentence about it at once. Refusing
-        // rather than waiting: waiting would mean a keystroke whose effect
-        // arrives seconds later, on a row somebody has walked away from.
+        // A running creation cannot be called back, and this record is the only
+        // thing naming the worktree it is making — so refuse rather than wait.
         if self.starting() {
             self.discarding = Some(Discarding::Refused);
 
@@ -549,25 +392,16 @@ impl Draft {
         false
     }
 
-    /// Whether a creation got far enough to have made something that is still
-    /// there.
-    ///
-    /// **Any step at all counts.** Each line was written before the thing it
-    /// describes was attempted, so a creation that said one thing may have done
-    /// it — and the question this answers is *is there anything to be left
-    /// behind*, where a maybe has to read as a yes.
+    /// Whether a creation got far enough to have made something. Any step
+    /// counts: each was written before it was attempted, so maybe reads as yes.
     fn made_something(&self) -> bool {
         self.progress
             .as_ref()
             .is_some_and(|progress| !progress.steps.is_empty())
     }
 
-    /// What the list calls it: the first thing said about the work, or a
-    /// standing name until something is.
-    ///
-    /// The first line rather than the whole of it, because the work is a
-    /// paragraph and the list is one line per row. A draft with nothing in it is
-    /// still a row somebody has to be able to find their way back to.
+    /// What the list calls it: the first non-empty line of the work, or a
+    /// standing name until there is one.
     pub fn title(&self) -> String {
         self.work
             .text()
@@ -578,21 +412,12 @@ impl Draft {
             .to_string()
     }
 
-    /// Do what the keyboard asked.
-    ///
-    /// **Nothing at all while a spawn is being made from it.** The text has
-    /// left — it is a command line on its way to a session — so a character
-    /// typed into the form now would change what is on screen and nothing else,
-    /// which is the one thing a form must never do.
+    /// Do what the keyboard asked. Nothing at all while a spawn is being made
+    /// from it: the text has already left.
     fn edited(&mut self, edit: Edit) {
-        // A question about throwing it away stands until it is answered, and
-        // anything but the answer is an answer of *no* — including a key aimed
-        // at the form. The keystroke is spent saying so rather than also landing
-        // in the text, so *don't* never leaves a character behind.
-        //
-        // **Only the question is worth a keystroke.** A refusal is a notice
-        // rather than something waiting on an answer, so a key clears it and
-        // goes on to do what it says: there is nothing there to answer *no* to.
+        // A standing question is answered no by any key, and the keystroke is
+        // spent on that rather than also landing in the text. A refusal is only
+        // a notice: the key clears it and goes on to do what it says.
         if matches!(self.discarding.take(), Some(Discarding::Asked)) {
             return;
         }
@@ -626,22 +451,10 @@ impl Draft {
         2 + self.choices.len()
     }
 
-    /// The form, laid out for a region of this shape.
-    ///
-    /// Laid out once and rendered from, rather than drawn straight into a
-    /// buffer, because where the caret goes falls out of the same arithmetic
-    /// that wraps the text — and a caret worked out a second way would sit one
-    /// cell from the character it belongs to on exactly the lines that wrapped.
-    ///
-    /// **What is kept in view differs by what the form is doing.** While a spawn
-    /// is being made, it is what the creation has said, because nothing else on
-    /// the form is going to change and that is the only thing worth a short
-    /// slot's rows. Once it is being written again — including after a creation
-    /// stopped — it is the control the keyboard is in, because a caret you
-    /// cannot see is worse than a reason you have to scroll to. And while a
-    /// question about throwing it away is standing, it is the question, which
-    /// outranks both: it is the only thing on the form waiting on an answer, and
-    /// the next key is that answer wherever the form happens to be scrolled to.
+    /// The form, laid out for a region of this shape. Laid out once, so the
+    /// caret falls out of the same arithmetic that wraps the text. What stays
+    /// in view: a standing discard question outranks everything; else the
+    /// creation's record while starting; else the control the keyboard is in.
     pub fn form(&self, region: Size) -> Form {
         let footer = self.footer();
         let hint = footer.rows(region.rows);
@@ -690,10 +503,8 @@ impl Draft {
             record = Some(from);
 
             showing = Some(match showing {
-                // Being written again, so the control the keyboard is in is what
-                // has to stay on screen — and what happened is reached for with
-                // whatever rows are left over, because a caret you cannot see is
-                // worse than a sentence you have to make room for.
+                // Being written again: the keyboard's control stays on screen,
+                // and the record gets whatever rows are left over.
                 Some((control, _)) if !self.starting() => (control, last),
                 _ => (from, last),
             });
@@ -705,14 +516,9 @@ impl Draft {
             }
             let from = lines.len();
             lines.extend(asked(discarding, self.made_something(), width));
-            // The newest thing on the form and the only one waiting on a person,
-            // so it wins the rows outright — including from the control the
-            // keyboard is in, which is not being typed into while a question is
-            // up. **The record comes with it** where there is one: both the
-            // question and the refusal are about what a creation already made,
-            // and pointing at a record that has scrolled off says nothing. A
-            // form too short for both keeps the end of the span, which is the
-            // question itself.
+            // The question wins the rows, and the record comes with it where
+            // there is one — the question is about what that record names. A
+            // form too short for both keeps the question itself.
             showing = Some((record.unwrap_or(from), lines.len() - 1));
         }
 
@@ -723,10 +529,8 @@ impl Draft {
             scroll,
             footer,
             hint,
-            // Nothing to type into while the spawn is being made — or while a
-            // question is standing, where the next key is an answer — so nothing
-            // saying you can: a caret parked in a field the keyboard cannot
-            // reach is the form telling a lie about itself.
+            // No caret while the spawn is being made or a question is standing:
+            // nothing typed then lands in a field.
             caret: (!self.starting() && self.discarding.is_none())
                 .then(|| {
                     caret.and_then(|(column, row)| on_region(column, row, scroll, region, height))
@@ -736,10 +540,6 @@ impl Draft {
     }
 
     /// What the foot of the form says, which depends on what it is doing.
-    ///
-    /// A question outranks the rest: while one is standing every key on the
-    /// keyboard is one of two answers, so a footer still listing what the form
-    /// does would be listing things no key will do next.
     fn footer(&self) -> &'static Footer {
         match &self.discarding {
             Some(Discarding::Asked) => &WHILE_ASKING,
@@ -749,16 +549,10 @@ impl Draft {
     }
 }
 
-/// What a creation has said, as the block the form ends in.
-///
-/// The heading says which of the two this is; under it the steps read as what
-/// they were written as — things about to be done — and then whatever stopped
-/// it.
-///
-/// **Both are broken across lines rather than cut**, which is the one place in
-/// the app text is not simply elided to the width it has. A step names a
-/// worktree and a branch and a refusal carries git's own words, which name
-/// paths too; a record you cannot read the end of is not a record of anything.
+/// What a creation has said, as the block the form ends in. Broken across
+/// lines rather than cut — the one place in the app text is not elided —
+/// because steps and refusals name paths, and a record you cannot read the end
+/// of is not a record.
 fn said(progress: &Progress, width: usize) -> Vec<Line<'static>> {
     let stopped = progress.trouble.is_some();
     let mut lines = vec![Line::styled(
@@ -785,12 +579,7 @@ fn said(progress: &Progress, width: usize) -> Vec<Line<'static>> {
 }
 
 /// What the form says about throwing the draft away: the question, or why it
-/// will not be thrown away yet.
-///
-/// **In amber, which is the colour the app admits things in.** A question is not
-/// an admission, but it is the same thing from where the user sits — the app
-/// saying *this one is on you* — and it is the only thing on the form that is
-/// waiting for an answer rather than describing something.
+/// will not be thrown away yet. In amber, the colour the app admits things in.
 fn asked(discarding: &Discarding, made_something: bool, width: usize) -> Vec<Line<'static>> {
     let (heading, why) = match discarding {
         Discarding::Asked if made_something => (DISCARD, AND_WHAT_WAS_MADE),
@@ -838,12 +627,8 @@ fn field(
     ))
 }
 
-/// Where the caret lands on the region, once the form has been scrolled under
-/// it.
-///
-/// Nothing at all when it falls outside — a form with no room for the field the
-/// keyboard is in should have no caret rather than one parked at the edge,
-/// saying what you type will land somewhere it will not.
+/// Where the caret lands on the region once the form has been scrolled under
+/// it, or nothing when it falls outside — never a caret parked at the edge.
 fn on_region(
     column: u16,
     row: u16,
@@ -857,11 +642,8 @@ fn on_region(
 }
 
 /// Do to a text field what the keyboard asked, and say whether it was being
-/// finished with.
-///
-/// `Enter` is the one key that means two things, and the field settles which by
-/// what it holds: a description is a paragraph and takes the line break, while a
-/// path has no lines in it, so there `Enter` is *done with this field*.
+/// finished with. `Enter` is a line break in a paragraph; in a one-line field
+/// it means done with this field.
 fn typed(field: &mut Text, edit: Edit) -> bool {
     match edit {
         Edit::Typed(character) => field.typed_in(character),
@@ -879,8 +661,7 @@ fn typed(field: &mut Text, edit: Edit) -> bool {
     false
 }
 
-/// Which control is the one at this position: the two fields first, and then
-/// the harness's lists in the order it offered them.
+/// Which control is at this position: the two fields, then the harness's lists.
 fn control(at: usize) -> Control {
     match at {
         0 => Control::Repository,
@@ -914,8 +695,7 @@ fn indented(text: &str, how_it_reads: Style) -> Line<'static> {
 
 /// One of the harness's lists of choices, and which of them is picked.
 struct Picked {
-    /// What the list is called. The form draws it and knows nothing else about
-    /// it.
+    /// What the list is called.
     title: &'static str,
     /// What can be picked. Never empty — see [`Picked::of`].
     options: Vec<Choice>,
@@ -924,8 +704,7 @@ struct Picked {
 }
 
 impl Picked {
-    /// The list, on the harness's own default — or nothing at all, when the
-    /// harness offered nothing.
+    /// The list on the harness's own default, or nothing when it offered nothing.
     fn of(choices: &Choices) -> Option<Self> {
         if choices.options.is_empty() {
             return None;
@@ -950,10 +729,7 @@ impl Picked {
     }
 
     /// Do what the keyboard asked, and say whether the list was being finished
-    /// with.
-    ///
-    /// Both ends stop rather than wrap, for the reason the list of spawns does:
-    /// a control you can hold a place in is one whose ends you can feel.
+    /// with. Both ends stop rather than wrap, like the list of spawns.
     fn edited(&mut self, edit: Edit) -> bool {
         match edit {
             Edit::Up => self.at = self.at.saturating_sub(1),
@@ -991,35 +767,27 @@ impl Picked {
 pub struct Form {
     /// Everything above the hint.
     lines: Vec<Line<'static>>,
-    /// How far down those lines sit, so what the form is keeping in view is on
-    /// screen.
+    /// How far down those lines sit.
     scroll: u16,
-    /// What the hint says, which is not the same while a spawn is being made.
+    /// What the hint says.
     footer: &'static Footer,
-    /// How many rows the hint takes, which is none on a region too short to
-    /// spare them.
+    /// How many rows the hint takes; none on a region too short to spare them.
     hint: u16,
-    /// Where the caret goes, when the keyboard is in something you can type
-    /// into.
+    /// Where the caret goes, when the keyboard is in something typeable.
     caret: Option<(u16, u16)>,
 }
 
 impl Form {
-    /// Where the caret goes, relative to the region's own top left.
-    ///
-    /// Nothing when the keyboard is in a list of choices: there is nothing to
-    /// type there, and a caret parked beside a list would say there was.
+    /// Where the caret goes, relative to the region's own top left. Nothing
+    /// when the keyboard is in a list of choices: there is nothing to type.
     pub fn caret(&self) -> Option<(u16, u16)> {
         self.caret
     }
 }
 
 impl Widget for Form {
-    /// Draw the form into its region.
-    ///
-    /// The hint is anchored to the bottom rather than set down after the last
-    /// control, so it stays where the eye last found it however long the form
-    /// is — the same as the list's own footer, and for the same reason.
+    /// Draw the form into its region, the hint anchored to the bottom like the
+    /// list's own footer.
     fn render(self, area: Rect, buffer: &mut Buffer) {
         let [body, hint] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(self.hint)]).areas(area);
@@ -1031,11 +799,8 @@ impl Widget for Form {
     }
 }
 
-/// Something typed into, and where the caret is in it.
-///
-/// Characters rather than bytes: the caret counts characters, and an index into
-/// a `String` would have to be kept on a character boundary by hand — a class of
-/// panic taken on for the sake of an allocation nobody would measure.
+/// Something typed into, and where the caret is in it. Characters rather than
+/// bytes, so the caret never has to be kept on a `String` boundary by hand.
 struct Text {
     /// What has been typed.
     typed: Vec<char>,
@@ -1068,11 +833,8 @@ impl Text {
         self.typed.iter().collect()
     }
 
-    /// Take a character at the caret.
-    ///
-    /// Control characters are dropped: a terminal sends plenty of them that are
-    /// not keys anybody meant to type, and a cell holding one draws as a hole in
-    /// the middle of a sentence.
+    /// Take a character at the caret. Control characters are dropped: a
+    /// terminal sends ones nobody meant to type, and they draw as holes.
     fn typed_in(&mut self, character: char) {
         if character != '\n' && character.is_control() {
             return;
@@ -1119,20 +881,13 @@ impl Text {
 
     /// The text as it lands on a field this wide, and where the caret is in it.
     ///
-    /// **A line too long is broken where it runs out of room**, rather than at
-    /// the space before it. Prose reads better wrapped on its spaces — the list
-    /// does exactly that with the one sentence it shows — but this text is being
-    /// typed into, and the caret has to sit on the cell holding the character it
-    /// is beside. A wrap that moved a word down to the next line would move the
-    /// caret with it, in the middle of typing the word. *Accepted cost:* a long
-    /// word is split across two lines.
+    /// Lines break where they run out of room, not at spaces, so the caret
+    /// stays on the cell of its character while a word is typed. Accepted
+    /// cost: a long word is split across two lines.
     ///
-    /// **A line that is exactly full rolls over before anything else happens**,
-    /// including before a line break. It has no cell left for the caret to sit
-    /// on, and the next character typed there would be drawn underneath it
-    /// anyway — so that is where the caret goes. *Accepted cost:* a line the
-    /// user ended exactly at the width is followed by a blank row, which a
-    /// terminal that defers its wrap would not show.
+    /// An exactly-full line rolls over before anything else, including a line
+    /// break, since it has no cell left for the caret. Accepted cost: a line
+    /// ended exactly at the width is followed by a blank row.
     fn wrapped(&self, width: usize) -> Wrapped {
         let width = width.max(1);
         let mut lines = vec![String::new()];
@@ -1173,8 +928,7 @@ fn full(lines: &[String], width: usize) -> bool {
         .is_some_and(|line| line.chars().count() >= width)
 }
 
-/// Where the next character would go: which line is being written, and how far
-/// along it.
+/// Where the next character would go: which line, and how far along it.
 fn end_of(lines: &[String]) -> (usize, usize) {
     (
         lines.len() - 1,
@@ -1184,8 +938,7 @@ fn end_of(lines: &[String]) -> (usize, usize) {
 
 /// Text as it lands on a field of a given width.
 struct Wrapped {
-    /// One string per line it takes up. Never empty: a field with nothing in it
-    /// is still a line, because the caret has to be somewhere.
+    /// One string per line. Never empty: the caret has to be somewhere.
     lines: Vec<String>,
     /// Which of those lines the caret is on, and how far along it.
     caret: (usize, usize),
@@ -1197,8 +950,7 @@ pub(crate) mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    /// Two lists of choices, neither of them the harness's own: the form is
-    /// handed titles and labels and knows nothing else, so a test using the real
+    /// Two lists of choices, neither the harness's own: a test using the real
     /// lists would be testing the harness instead.
     fn offered() -> Vec<Choices> {
         vec![
@@ -1239,12 +991,10 @@ pub(crate) mod tests {
         ]
     }
 
-    /// One draft, offering those choices.
     fn draft() -> Draft {
         Draft::new(Id(0), &offered())
     }
 
-    /// A draft with these keystrokes already in it.
     fn edited(edits: &[Edit]) -> Draft {
         let mut draft = draft();
         for edit in edits {
@@ -1254,15 +1004,12 @@ pub(crate) mod tests {
         draft
     }
 
-    /// The keystrokes that type something.
     fn typing(what: &str) -> Vec<Edit> {
         what.chars().map(Edit::Typed).collect()
     }
 
-    /// Drafts with these descriptions typed into them.
-    ///
-    /// Shared with the list's tests and the screen's, which both have to draw
-    /// drafts and have no business making them a second way.
+    /// Drafts with these descriptions typed into them. Shared with the list's
+    /// tests and the screen's.
     pub fn drafting(work: &[&str]) -> Drafts {
         let mut drafts = Drafts::new(offered());
 
@@ -1277,14 +1024,12 @@ pub(crate) mod tests {
         drafts
     }
 
-    /// The region the form is drawn into in these tests, which is exactly the
-    /// room a blank one needs.
+    /// Exactly the room a blank form needs.
     const REGION: Size = Size {
         columns: 40,
         rows: 20,
     };
 
-    /// The form as text, one string per row of the region.
     fn drawn(draft: &Draft, region: Size) -> String {
         let mut terminal = Terminal::new(TestBackend::new(region.columns, region.rows)).unwrap();
         terminal
@@ -1371,8 +1116,6 @@ F6 / F7 leave it — nothing is lost"
         assert_eq!(edited(&[Edit::Previous]).on, 3);
     }
 
-    /// The rule, stated as a test: a harness with nothing to offer under a
-    /// heading gets no control there at all, rather than an empty one.
     #[test]
     fn a_list_with_nothing_in_it_is_not_a_control() {
         let mut offered = offered();
@@ -1425,10 +1168,7 @@ F6 / F7 leave it — nothing is lost"
 
     #[test]
     fn the_form_is_told_what_a_choice_is_called_and_nothing_else_about_it() {
-        // An id no harness has, for the same reason the lists above are about
-        // colours: a test carrying a real harness's vocabulary would put that
-        // vocabulary outside the harness module, which is the invariant this
-        // very test is about.
+        // An id no harness has, so no harness vocabulary leaks into this test.
         let named = vec![Choices {
             title: "Whatever this harness calls it",
             options: vec![Choice {
@@ -1552,8 +1292,6 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
-    /// Where the terminal's own cursor goes, which is the only thing on screen
-    /// saying where what you type will land.
     fn caret(draft: &Draft) -> Option<(u16, u16)> {
         draft.form(REGION).caret()
     }
@@ -1578,9 +1316,6 @@ F6 / F7 leave it — nothing is lost"
         assert_eq!(wrapped.0, u16::try_from(INDENT).unwrap() + 1);
     }
 
-    /// The caret has to be on a cell of the field, and a line that is exactly
-    /// full has no cell left on it — so the caret belongs at the start of the
-    /// line under it, which is also where the next character will be drawn.
     #[test]
     fn a_caret_at_the_end_of_a_line_it_filled_is_at_the_start_of_the_next_one() {
         // Forty columns, two of them the indent: thirty-eight fills a line.
@@ -1588,8 +1323,8 @@ F6 / F7 leave it — nothing is lost"
         edits.extend(typing(&"a".repeat(38)));
         edits.push(Edit::Entered);
         edits.extend(typing("b"));
-        // Back over the `b` and onto the line break, which is where the caret
-        // used to be reported one cell off the right-hand edge and vanish.
+        // On the line break, the caret used to be reported one cell off the
+        // right-hand edge and vanish.
         edits.extend([Edit::Left, Edit::Left]);
 
         let at = caret(&edited(&edits)).expect("a caret in the field being typed into");
@@ -1664,9 +1399,6 @@ F6 / F7 leave it — nothing is lost"
         assert_ne!(started[0], started[2]);
     }
 
-    // Starting one: what a draft hands over, what it says while it happens, and
-    // what it is again if it does not.
-
     /// A draft with a repository and some work in it, ready to be started.
     fn filled_in() -> Drafts {
         let mut drafts = Drafts::new(offered());
@@ -1682,13 +1414,11 @@ F6 / F7 leave it — nothing is lost"
         drafts
     }
 
-    /// The one draft there is.
     fn only(drafts: &Drafts) -> &Draft {
         &drafts.all()[0]
     }
 
-    /// The region a form carrying a creation's record needs, which is longer
-    /// than a blank one's by exactly that record.
+    /// Room for a form carrying a creation's record.
     const WITH_A_RECORD: Size = Size {
         columns: 40,
         rows: 24,
@@ -1703,8 +1433,6 @@ F6 / F7 leave it — nothing is lost"
 
         assert_eq!(wanted.repository, PathBuf::from("/code/project"));
         assert_eq!(wanted.work, "add retry logic");
-        // The ids of what each list settled on, which is all the form ever knew
-        // about them.
         assert_eq!(wanted.answers, ["blue", "small"]);
     }
 
@@ -1720,9 +1448,6 @@ F6 / F7 leave it — nothing is lost"
         assert_eq!(wanted.answers, ["red", "small"]);
     }
 
-    /// **Refuse rather than guess, and never at the cost of the typing.** The
-    /// app has no way to invent a repository, and a draft that stopped for that
-    /// reason is one keystroke from being right.
     #[test]
     fn a_draft_that_does_not_say_enough_refuses_in_place_and_keeps_every_character() {
         let mut drafts = Drafts::new(offered());
@@ -1771,9 +1496,6 @@ F6 / F7 leave it — nothing is lost"
         assert!(screen.contains("  creating the worktree"), "{screen}");
     }
 
-    /// The whole reason a creation says what it is *about* to do: what it got as
-    /// far as survives it stopping, so a worktree left on disk is written down
-    /// rather than a mystery.
     #[test]
     fn a_creation_that_stopped_still_says_what_it_had_already_made() {
         let mut drafts = filled_in();
@@ -1839,10 +1561,6 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
-    /// **A refusal costs the choices no more than it costs the paragraph.**
-    /// Everything the form collected is still there afterwards — the repository,
-    /// the work, and every option that was picked — so starting it again once
-    /// the machine is fixed is one keystroke rather than filling a form in twice.
     #[test]
     fn a_draft_that_could_not_be_started_still_holds_everything_that_was_picked() {
         let mut drafts = filled_in();
@@ -1873,12 +1591,6 @@ F6 / F7 leave it — nothing is lost"
         assert!(drafts.submit(id).is_some());
     }
 
-    // Throwing one away, which is the one thing in the app that destroys
-    // something existing nowhere else — and therefore the one thing that asks.
-
-    /// **A keystroke does not throw away a paragraph.** Everywhere else a
-    /// refusal is what protects the typing; here there is nothing to refuse, so
-    /// the question is what protects it.
     #[test]
     fn a_draft_asks_before_it_is_thrown_away() {
         let mut drafts = filled_in();
@@ -1907,8 +1619,6 @@ F6 / F7 leave it — nothing is lost"
         assert!(drafts.of(id).is_none());
     }
 
-    /// **Other drafts are unaffected**, which is the whole of what a draft owns:
-    /// a record in a list, and throwing one away is one record leaving it.
     #[test]
     fn throwing_one_draft_away_leaves_every_other_exactly_as_it_was() {
         let mut drafts = drafting(&["the first", "the second", "the third"]);
@@ -1921,10 +1631,6 @@ F6 / F7 leave it — nothing is lost"
         assert_eq!(left, ["the first", "the third"]);
     }
 
-    /// A keystroke that is not the answer answers *no* — and is spent saying
-    /// so. It has to be spent: a key that both took the question back and typed
-    /// itself into the field would leave a character behind from a keystroke
-    /// somebody meant as *don't*.
     #[test]
     fn anything_typed_at_the_question_keeps_the_draft_and_is_not_typed_into_it() {
         let mut drafts = filled_in();
@@ -1942,9 +1648,6 @@ F6 / F7 leave it — nothing is lost"
         assert_eq!(only(&drafts).work.text(), "add retry logic");
     }
 
-    /// And a question is never left standing behind you: walking off the row
-    /// takes it back, so coming back to a draft never lands on an armed
-    /// keystroke.
     #[test]
     fn moving_away_from_a_draft_takes_the_question_back() {
         let mut drafts = filled_in();
@@ -1961,17 +1664,12 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
-    /// The region a form needs for a creation's record **and** a question about
-    /// throwing the draft away, which is the longest a form ever gets.
+    /// Room for a creation's record and a discard question at once.
     const WITH_A_QUESTION: Size = Size {
         columns: 40,
         rows: 32,
     };
 
-    /// **A draft mid-creation is the one draft that owns something.** It has
-    /// made, or is about to make, a worktree — and its record is the only thing
-    /// on screen saying so, so throwing it away would orphan the worktree and
-    /// the sentence naming it in the same keystroke. It refuses, and says why.
     #[test]
     fn a_draft_a_spawn_is_being_made_from_is_not_thrown_away() {
         let mut drafts = filled_in();
@@ -2001,13 +1699,6 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
-    /// **The one thing throwing a draft away can leave behind.** A creation that
-    /// stopped after it had already made a worktree leaves it on disk, and this
-    /// record is the only thing on screen naming it — so the question says that
-    /// rather than claiming there is nothing to lose but the words. What it
-    /// does not do is refuse: the record above the question is what somebody is
-    /// answering it with, and the app names what it finds under the worktree
-    /// root the next time it starts.
     #[test]
     fn a_draft_whose_creation_already_made_something_says_so_when_it_asks() {
         let mut drafts = filled_in();
@@ -2034,10 +1725,6 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
-    /// **The footer promises only what the app honours.** A key it has no
-    /// meaning for — `Esc`, `F1`, `F4` — leaves the question standing rather
-    /// than answering it, so a footer saying that anything else keeps the draft
-    /// teaches somebody to press `Esc` and walk away from a question still up.
     #[test]
     fn the_question_names_only_the_answers_the_app_really_takes() {
         let mut drafts = filled_in();
@@ -2053,13 +1740,6 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
-    /// **A refusal is a notice, and it does not outlive what it was about.**
-    /// Press the key mid-creation and the draft says no; when that creation then
-    /// stops, the draft is only text again and the refusal is a sentence about a
-    /// spawn nobody is making. Left standing it costs three things at once: the
-    /// form says a spawn is being made from it, the caret stays away from a form
-    /// that is taking keys again, and the next character typed is swallowed by a
-    /// question that is not being asked.
     #[test]
     fn a_refusal_does_not_outlive_the_creation_it_was_about() {
         let mut drafts = filled_in();
@@ -2087,8 +1767,6 @@ F6 / F7 leave it — nothing is lost"
         );
     }
 
-    /// And the moment the creation stops, the draft is only text again — so it
-    /// can be thrown away like any other, record and all.
     #[test]
     fn a_draft_whose_creation_stopped_can_be_thrown_away() {
         let mut drafts = filled_in();
@@ -2101,8 +1779,6 @@ F6 / F7 leave it — nothing is lost"
         assert!(drafts.all().is_empty());
     }
 
-    /// Nothing to type into while a question is up: the next key is an answer,
-    /// and a caret would say it was going into the field it is sitting in.
     #[test]
     fn a_question_takes_the_caret_away_because_the_next_key_is_an_answer() {
         let mut drafts = filled_in();
@@ -2113,10 +1789,6 @@ F6 / F7 leave it — nothing is lost"
         assert!(only(&drafts).form(WITH_A_QUESTION).caret().is_none());
     }
 
-    /// The key that throws a draft away is learnt where the draft is, because
-    /// the list's own footer is about spawns — and while the question is
-    /// standing the foot of the form says what answers it, since that is the
-    /// only thing the keyboard is doing.
     #[test]
     fn a_form_says_what_throws_it_away_and_then_what_answers_the_question() {
         let mut drafts = filled_in();

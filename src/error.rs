@@ -1,9 +1,5 @@
-//! What a refusal is.
-//!
-//! The app's rule is *refuse rather than guess*, and every refusal ends up in
-//! front of a person: either on their shell before tmux exists, or on the pane
-//! they are typing in. So an error carries a sentence, not a code — there is
-//! nothing above `main` that would branch on a variant.
+//! Errors carry a sentence for a person, not a code: nothing above `main`
+//! branches on a variant.
 
 use std::fmt;
 
@@ -14,7 +10,6 @@ pub struct Error {
 }
 
 impl Error {
-    /// Refuse, saying why.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),

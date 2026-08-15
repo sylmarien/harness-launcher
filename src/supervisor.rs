@@ -1,19 +1,10 @@
 //! The thread that watches, and the channel it reports down.
 //!
-//! There is no task per spawn. tmux owns the children and their output is never
-//! read, so twenty spawns are twenty *rows*, not twenty tasks — which collapses
-//! the whole concurrency requirement to a main thread that draws, one thread
-//! that looks, and a channel between them.
-//!
-//! A tick is **one** `list-panes` covering every spawn at once, plus a stat per
-//! live spawn whose record is read only when it has changed underneath. The
-//! `ps` probe is a tie-breaker rather than a per-tick cost: it is run only for
-//! a spawn the ladder would otherwise call unknown, and its answer stands for a
-//! few seconds rather than being asked for again five times a second.
-//!
-//! Blocking calls on a thread, not an asynchronous runtime. Asynchrony earns
-//! its keep multiplexing hundreds of simultaneous waits; this is one subprocess
-//! and twenty stats, five times a second.
+//! A main thread that draws, one blocking thread that looks, a channel
+//! between them — no task per spawn, no async runtime. A tick is one
+//! `list-panes` plus a stat per live spawn; the `ps` probe runs only for a
+//! spawn the ladder would otherwise call unknown, and its answer stands for
+//! a few seconds. See docs/developers/concurrency.md.
 
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -28,14 +19,9 @@ use crate::snapshot::{self, Evidence, Foreground, Snapshot, Watched};
 use crate::tmux::{Pane, Server};
 
 /// How often the supervisor looks.
-///
-/// A starting number to feel out in use rather than a constant to defend: fast
-/// enough that a spawn stopping shows up before you could notice it had, slow
-/// enough that the cost is one subprocess five times a second.
 const TICK: Duration = Duration::from_millis(200);
 
-/// What the supervisor hands back: what it sees, and how to give it something
-/// more to look at.
+/// What the supervisor hands back.
 pub struct Watching {
     /// What every spawn is doing, one snapshot per tick.
     pub snapshots: Receiver<Snapshot>,
@@ -45,14 +31,9 @@ pub struct Watching {
     pub leaving: Sender<String>,
 }
 
-/// Start watching, and hand back the snapshots.
-///
-/// The supervisor owns everything it touches and shares nothing: each snapshot
-/// is built whole and moved down the channel, so the list can never read a row
-/// while it is being written. A spawn made while the app runs arrives the same
-/// way, in the other direction — moved in whole rather than shared, so there is
-/// still nothing two threads both hold. When the receiving end goes, so does the
-/// thread: there is nothing to look at any more.
+/// Start watching, and hand back the snapshots. Everything moves whole down
+/// a channel, so no two threads share state; the thread exits when the
+/// receiving end goes.
 pub fn watch(server: Server, watched: Vec<Watched>) -> Watching {
     let (sending, snapshots) = mpsc::channel();
     let (arriving, arrivals) = mpsc::channel();
@@ -86,8 +67,7 @@ struct Supervisor {
     records: Records,
     /// What the tie-breaker found, for the spawns it has been run for.
     probes: Probes,
-    /// What it said last time, which is where a spawn it can no longer read
-    /// gets the last status it could.
+    /// What it said last time; where a lost spawn's last status comes from.
     said: Snapshot,
 }
 
@@ -109,21 +89,11 @@ impl Supervisor {
         }
     }
 
-    /// Look once, and say what everything is doing.
-    ///
-    /// A tmux that will not answer is not a refusal: no panes is every spawn
-    /// unaccounted for, which the ladder already has an honest answer for.
-    ///
-    /// **Spawns that have arrived are taken up first**, so one made a moment
-    /// ago is in this snapshot rather than the next: a row that appears in the
-    /// list and says nothing for a fifth of a second reads as the app
-    /// hesitating about something it just did itself.
-    ///
-    /// **And spawns that have been retired are let go of before anything is
-    /// asked about them**, for the mirror image of the same reason: a
-    /// retirement takes the pane away, so a spawn still watched a tick later is
-    /// one this would report as a pane it cannot find — the app claiming its
-    /// own instrumentation is broken about something it just did itself.
+    /// Look once, and say what everything is doing. Arrivals are taken up
+    /// first, so a new spawn is in this snapshot; retirements are let go of
+    /// before anything is asked, so a retired spawn is not reported as a
+    /// missing pane. A tmux that will not answer reads as no panes, which the
+    /// ladder already handles.
     fn tick(&mut self) -> Snapshot {
         let at = Instant::now();
         while let Ok(arrival) = self.arrivals.try_recv() {
@@ -143,10 +113,8 @@ impl Supervisor {
             live.insert(pane.pid);
 
             // The tie-breaker is asked exactly when the ladder would otherwise
-            // call this spawn unknown — the record will not resolve and it is
-            // too old for that to be start-up. That condition is a property of
-            // the spawn rather than of what the last tick concluded, so an
-            // answer cannot turn the question off and make the row flicker.
+            // call this spawn unknown. Keying on the spawn rather than the
+            // last tick's conclusion stops the row flickering.
             let reading = self.records.of(pane.pid);
             let unresolved = matches!(reading, Reading::Unresolved(_));
             let foreground = (unresolved && snapshot::past_grace(spawn, at))
@@ -163,9 +131,8 @@ impl Supervisor {
         self.records.forget_all_but(&live);
         self.probes.forget_all_but(&live);
 
-        // The tick before this one is what a spawn the app has *stopped* being
-        // able to read still knows about itself: what it could last tell. Kept
-        // here rather than inside the ladder, which is pure and is handed it.
+        // The previous snapshot carries each spawn's last readable status; the
+        // ladder is pure and is handed it.
         self.said = snapshot::build(&self.watched, &panes, &evidence, at, &self.said);
 
         self.said.clone()
@@ -192,12 +159,9 @@ impl Records {
         }
     }
 
-    /// What the record for the session running as `pid` says.
-    ///
-    /// The file is only opened when it has changed since it was last read. A
-    /// record that will not resolve is remembered exactly like one that will,
-    /// so a spawn the app cannot read is not re-read five times a second
-    /// either.
+    /// What the record for the session running as `pid` says. Opened only
+    /// when the file has changed; an unresolved reading is cached the same
+    /// way, so it is not re-read five times a second either.
     fn of(&mut self, pid: u32) -> Reading {
         let Some(files) = &self.files else {
             return Reading::Unresolved(
@@ -243,22 +207,13 @@ fn unreadable(trouble: &std::io::Error) -> Reading {
     Reading::Unresolved(format!("the app cannot read what it is doing: {trouble}"))
 }
 
-/// How long a tie-breaker's answer is good for.
-///
-/// This is the whole of what makes the probe a tie-breaker rather than a
-/// per-tick cost: a spawn nobody can resolve costs one `ps` every few seconds
-/// instead of five a second. Keeping an answer *for ever* was the other way to
-/// buy that, and it is worse — a `ps` that failed once would pin a spawn to
-/// unknown with a stale complaint for as long as it lived, and a subprocess
-/// that briefly held the terminal would pin it to stopped.
+/// How long a tie-breaker's answer is good for. Caching keeps the probe off
+/// the per-tick path; the bounded lifetime keeps a failed or transient answer
+/// from pinning a spawn for ever.
 const AN_ANSWER_LASTS: Duration = Duration::from_secs(5);
 
-/// What the tie-breaker found, for the spawns it has been run for.
-///
-/// An answer is about one process in one pane at one moment, so it is kept
-/// against the process it was found for and the time it was found: a new
-/// session in the same pane is a new question, and so is the same session five
-/// seconds later.
+/// Probe answers, keyed by spawn. An answer is about one process at one
+/// moment, so a new pid or a stale time is a new question.
 #[derive(Default)]
 struct Probes {
     found: HashMap<String, Answer>,
@@ -275,8 +230,8 @@ struct Answer {
 }
 
 impl Probes {
-    /// What holds this spawn's terminal — asked afresh only when the last
-    /// answer has gone stale, or was about a session that has since gone.
+    /// What holds this spawn's terminal, asked afresh only when the last
+    /// answer is stale or about a session that has gone.
     fn of(&mut self, spawn: &str, pane: &Pane, at: Instant) -> Foreground {
         if let Some(answer) = self.found.get(spawn)
             && answer.about == pane.pid
@@ -304,11 +259,8 @@ impl Probes {
     }
 }
 
-/// Ask what holds a pane's terminal.
-///
-/// The tie-breaker, and the only part of a tick that is per-spawn work — which
-/// is why it runs for a spawn the previous tick left unresolved and for nobody
-/// else.
+/// Ask what holds a pane's terminal — the only per-spawn subprocess, which is
+/// why it runs only for unresolved spawns.
 fn foreground(tty: &str) -> Foreground {
     let outcome = match process::run("ps", &["-t", tty, "-o", "pgid=,tpgid=,comm=,args="]) {
         Ok(outcome) => outcome,
@@ -327,13 +279,10 @@ fn foreground(tty: &str) -> Foreground {
     Foreground::Unreadable(format!("`ps` had nothing to say about {tty}: {complaint}"))
 }
 
-/// Read what `ps` printed about one terminal.
-///
-/// The foreground process group is the one whose id equals the terminal's, and
-/// it can hold more than one process — so every row of it is read before
-/// concluding the harness is not among them. A listing with no foreground group
-/// in it at all is unreadable rather than empty: **a failure to read must never
-/// come back as the agent being gone.**
+/// Read what `ps` printed about one terminal. The foreground group is the one
+/// whose id equals the terminal's, and it can hold several processes. A
+/// listing with no foreground group is unreadable, never empty: a failed read
+/// must never count as the agent being gone.
 fn holding(listing: &str) -> Foreground {
     let mut looked_at_something = false;
 
@@ -389,9 +338,8 @@ mod tests {
 
     #[test]
     fn the_processes_that_are_not_in_the_foreground_are_not_asked_about() {
-        // The first row of the recording is the shell that started the job, and
-        // it is not in the foreground group. Were it read, its name would be
-        // classified like any other.
+        // The first row of the recording is the starting shell, outside the
+        // foreground group.
         let shell = WITHOUT.lines().next().unwrap();
 
         assert_eq!(
@@ -406,8 +354,7 @@ mod tests {
         assert!(matches!(holding("garbage\n"), Foreground::Unreadable(_)));
     }
 
-    /// The process the captured record belongs to, which is the one every
-    /// record written here is for.
+    /// The process the captured record belongs to.
     const PID: u32 = harness::RECORDED_PID;
 
     /// A directory the harness could be keeping its records in.
@@ -461,8 +408,7 @@ mod tests {
         let mut records = kept.records();
         records.of(PID);
 
-        // Changed underneath, but with the modification time it already had, so
-        // that only a second read could see the difference.
+        // Changed underneath, keeping the same modification time.
         let when = fs::metadata(kept.file()).unwrap().modified().unwrap();
         kept.writes("idle");
         fs::File::options()
@@ -559,10 +505,6 @@ mod tests {
         let mut probes = Probes::default();
         let asked = moment();
 
-        // The tick after a probe settled a spawn asks again, because what makes
-        // the question worth asking is the record not resolving rather than
-        // what the last answer led to. Getting the same answer back is what
-        // stops the row flicking between the two.
         let first = kept(&mut probes, &pane(4321), asked);
         let again = kept(&mut probes, &pane(4321), asked + AN_ANSWER_LASTS / 2);
 
@@ -600,13 +542,6 @@ mod tests {
         );
     }
 
-    /// A spawn made while the app runs is watched from the very next tick, and
-    /// **it does not spend that tick claiming the app is broken**: the grace
-    /// period counts from the moment it was adopted, so a session that has not
-    /// written a status yet reads as working rather than as unaccounted for.
-    ///
-    /// Against a real tmux, because what is being tested is the supervisor
-    /// finding a pane it was told about after it started looking.
     #[test]
     fn a_spawn_made_while_the_app_runs_is_watched_from_the_next_tick() {
         let tmux = PrivateTmux::start("supervisor-adopts-a-new-spawn");
@@ -647,38 +582,11 @@ mod tests {
         }
     }
 
-    /// **What a tick costs at the count the tranche is aimed at**, against a
-    /// real tmux holding twenty real panes.
-    ///
-    /// The shape of the cost is the claim being held here, and it is a shape
-    /// rather than a number: **one subprocess however many spawns there are**,
-    /// and everything else a stat apiece. Twenty spawns must therefore cost
-    /// about what one costs plus twenty file stats — not twenty `list-panes`,
-    /// and not twenty `ps` probes, which is what a tick would degenerate into if
-    /// anybody moved the per-spawn work out of the tie-breaker.
-    ///
-    /// The bound is half the period between ticks, which is loose on purpose:
-    /// what would make this fail is a tick that grew a per-spawn subprocess, and
-    /// that costs twenty forks rather than a few extra milliseconds. A number
-    /// tight enough to catch a slow machine would fail on one.
-    ///
-    /// **Named for what it asserts.** That a tick is *one* listing however many
-    /// spawns there are is counted under `strace` by `tests/twenty_spawns.rs`,
-    /// which can see the processes the app starts; nothing here can, so nothing
-    /// here claims to. What this holds is the consequence: a tick that had grown
-    /// a per-spawn subprocess could not stay inside the bound below.
-    ///
-    /// **It prints what it measured**, because the evidence document quotes
-    /// these timings and a number nothing emits cannot be checked against the
-    /// test it is attributed to:
-    ///
-    /// ```text
-    /// cargo test --release --bin harness-launcher -- --nocapture \
-    ///     a_tick_at_twenty_spawns
-    /// ```
-    ///
-    /// What was actually observed, on a machine that says which one it was, is
-    /// in `docs/evidence/scale-at-twenty.md`.
+    /// A tick is one listing plus stats, never per-spawn subprocesses;
+    /// `tests/twenty_spawns.rs` counts the subprocesses under `strace`, this
+    /// pins the consequence. The bound is loose on purpose so a slow machine
+    /// passes. It prints its timings because
+    /// `docs/evidence/scale-at-twenty.md` quotes them.
     #[test]
     fn a_tick_at_twenty_spawns_stays_comfortably_inside_the_period_between_ticks() {
         const SPAWNS: usize = 20;
@@ -730,10 +638,6 @@ mod tests {
         );
     }
 
-    /// A spawn that has been retired stops being reported at all — and in
-    /// particular does not come back as a pane the app cannot find, which is
-    /// what a retired spawn still being watched looks like the moment its
-    /// window goes.
     #[test]
     fn a_spawn_that_has_been_retired_is_let_go_of() {
         let tmux = PrivateTmux::start("supervisor-lets-go-of-a-retired-spawn");

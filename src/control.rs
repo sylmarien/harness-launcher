@@ -1,28 +1,11 @@
-//! The one client every spawn's output arrives down.
+//! The tmux control-mode client every spawn's output arrives down.
 //!
-//! tmux in control mode is not a terminal: it is a stream of notifications, one
-//! of which — `%output` — carries the bytes a pane produced, tagged with the
-//! pane that produced them. **One client carries every pane in the session**,
-//! including the windows nobody is looking at, which is what makes a single
-//! reader serve twenty spawns rather than twenty readers serving one each.
-//!
-//! Two things about it were learned the hard way, and both are load-bearing:
-//!
-//! - **A control client needs a terminal of its own.** On piped stdio tmux
-//!   refuses outright — `tcgetattr failed: Inappropriate ioctl for device` — so
-//!   the client runs inside a pty the app opens for it. One pty for the whole
-//!   app; the children's belong to tmux.
-//! - **It streams only what is produced while it is attached.** A pane that drew
-//!   itself before anyone was listening stays blank for ever, with no catching
-//!   up short of priming from `capture-pane`. The app never has to: it attaches
-//!   before it starts anything, and a spawn's window is opened holding nothing
-//!   but a placeholder so that its grid is already listening when the harness
-//!   replaces it.
-//!
-//! Everything else tmux is asked — make a window, start something in it, is it
-//! still alive — goes the other way, as an ordinary command, because control
-//! mode cannot report a process dying. Only two things travel back up this
-//! client: keystrokes, and the size of the slot.
+//! One client carries every pane in the session, so a single reader serves
+//! twenty spawns. A control client needs a pty of its own: on piped stdio tmux
+//! refuses with `tcgetattr failed`. It streams only what is produced while it
+//! is attached, so the app attaches before starting anything. Everything else
+//! tmux is asked goes the other way, as ordinary commands; only keystrokes and
+//! the size of the slot travel back up this client.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -38,10 +21,6 @@ use crate::screen::{Screen, Size};
 use crate::tmux::Server;
 
 /// How long the app waits to hear whether a control client attached.
-///
-/// Generous, because it costs nothing when it is not needed: tmux answers an
-/// attach immediately or not at all, so this is only ever spent on the way to a
-/// refusal.
 const ATTACHING: Duration = Duration::from_secs(5);
 
 /// The grid behind one pane, shared between the reader and whatever draws it.
@@ -52,12 +31,10 @@ type Grids = Arc<Mutex<HashMap<String, Grid>>>;
 
 /// An attached control-mode client.
 ///
-/// Dropping it hangs the client up — and takes nothing with it. The session and
-/// every spawn in it belong to the tmux server, which is a different process
-/// and outlives this one.
+/// Dropping it hangs the client up and takes nothing with it: the session and
+/// its spawns belong to the tmux server, which outlives this process.
 pub struct Client {
-    /// The pty the client runs in, kept because closing it is what ends the
-    /// client.
+    /// The pty the client runs in; closing it is what ends the client.
     terminal: Box<dyn MasterPty + Send>,
     /// What the app says back: keystrokes, and the size of the slot.
     saying: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -67,21 +44,17 @@ pub struct Client {
     ended: Ended,
 }
 
-/// Why the app stopped being told what the spawns are drawing, once it has.
+/// Why the reader stopped, once it has.
 ///
-/// A control client that goes takes every slot with it, and takes them
-/// *quietly*: the grids stay exactly as they were, which on screen is a session
-/// that has stopped moving rather than anything that looks like a failure. The
-/// reader therefore leaves its reason behind, and the app looks for one every
-/// frame.
+/// A dead client leaves the grids frozen rather than visibly failed, so the
+/// reader records its reason and the app checks for one every frame.
 type Ended = Arc<OnceLock<String>>;
 
 impl Client {
     /// Attach to a session, and start reading everything in it.
     ///
-    /// The size is the slot's, because the slot is what every spawn draws into:
-    /// a control client's size is the size of every window in the session it is
-    /// attached to, so this one number shapes them all.
+    /// The size is the slot's: a control client's size shapes every window in
+    /// the session.
     pub fn attach(server: &Server, session: &str, slot: Size) -> Result<Self> {
         let pty = native_pty_system()
             .openpty(sized(slot))
@@ -157,9 +130,8 @@ impl Client {
 
     /// Put a grid behind a pane, and hand it back.
     ///
-    /// Everything the pane produces from now on lands in it. Do this **before**
-    /// starting anything in that pane: output produced before there is a grid to
-    /// route it into is not held anywhere, and cannot be asked for again.
+    /// Call before starting anything in the pane: output produced with no grid
+    /// to route it into is not held anywhere and cannot be asked for again.
     pub fn watch(&self, pane: &str, size: Size) -> Grid {
         let grid: Grid = Arc::new(Mutex::new(Screen::new(size)));
         self.grids
@@ -170,11 +142,7 @@ impl Client {
         grid
     }
 
-    /// Let go of a pane's grid.
-    ///
-    /// For a spawn that has been retired, whose window has gone with it: what a
-    /// grid holds is a screenful of the app's own memory, and the reader would
-    /// carry on holding it for a pane nothing will ever arrive from again.
+    /// Let go of a retired pane's grid.
     ///
     /// Output for a pane with no grid is dropped, so a notification still in
     /// flight when this is called is the ordinary case rather than a race.
@@ -182,10 +150,8 @@ impl Client {
         self.grids.lock().expect(POISONED).remove(pane);
     }
 
-    /// Type at a spawn.
-    ///
-    /// Bytes as hex, which is the one encoding that survives arbitrary
-    /// keystrokes without anything having to be quoted for tmux's own parser.
+    /// Type at a spawn. Bytes travel as hex so nothing has to be quoted for
+    /// tmux's parser.
     pub fn send(&self, pane: &str, bytes: &[u8]) -> Result<()> {
         if bytes.is_empty() {
             return Ok(());
@@ -194,11 +160,8 @@ impl Client {
         self.say(&send_keys(pane, bytes))
     }
 
-    /// Say how big the slot is now.
-    ///
-    /// One call for every spawn there is: the windows in a session follow the
-    /// size of the client attached to it, so this is what makes the app's own
-    /// window being resized reach twenty children at once.
+    /// Say how big the slot is now. Windows follow the attached client's size,
+    /// so one call resizes every spawn.
     pub fn resize(&self, slot: Size) -> Result<()> {
         self.terminal.resize(sized(slot)).map_err(|trouble| {
             Error::new(format!(
@@ -209,12 +172,8 @@ impl Client {
         self.say(&format!("refresh-client -C {}x{}", slot.columns, slot.rows))
     }
 
-    /// Refuse once there is nothing on the other end any more.
-    ///
-    /// Asked every frame rather than waited on: what a hung-up client leaves
-    /// behind is a screenful of grids that have simply stopped changing, and a
-    /// session that looks like it is thinking is the one thing the app must
-    /// never show when it is not.
+    /// Refuse once the client has gone. Asked every frame, because a hung-up
+    /// client only leaves grids that have stopped changing.
     pub fn listening(&self) -> Result<()> {
         match self.ended.get() {
             None => Ok(()),
@@ -238,24 +197,14 @@ impl Client {
     }
 }
 
-/// What a lock says when the thread holding it died mid-write.
-///
-/// Nothing here can leave a grid or the client half-written: the reader applies
-/// whole chunks and the writer whole lines. A poisoned lock therefore means a
-/// panic somewhere else entirely, and carrying on with a screen nobody can
-/// explain is worse than stopping.
-///
-/// Said once, here, because the reader and whatever is drawing take the same
-/// locks and two wordings of it would read as two different faults.
+/// What a lock says when the thread holding it died mid-write. Said once so
+/// the reader and the drawing side report the same fault the same way.
 pub const POISONED: &str = "another thread panicked while holding a terminal";
 
 /// Read the client until it hangs up, routing output to the grid that owns it.
 ///
-/// Bytes rather than text. What a spawn draws is not obliged to be valid UTF-8
-/// — and even when it is, tmux chops the stream wherever the child's writes
-/// happened to land, so half a character at the end of one line is ordinary.
-/// Reading this as text would turn that into an error and lose the rest of the
-/// spawn's life.
+/// Bytes rather than text: what a spawn draws need not be valid UTF-8, and
+/// tmux may chop the stream mid-character.
 fn route(reader: Box<dyn Read + Send>, grids: &Grids, mut attaching: Handshake, ended: &Ended) {
     let mut client = BufReader::new(reader);
     let mut said = Vec::new();
@@ -274,8 +223,8 @@ fn route(reader: Box<dyn Read + Send>, grids: &Grids, mut attaching: Handshake, 
         let Some(output) = Output::parse(&said) else {
             continue;
         };
-        // The map is let go of before the grid is taken, so a slow frame being
-        // drawn from one spawn's grid never holds up another spawn's output.
+        // The map lock is released before the grid is taken, so a slow frame
+        // on one grid never holds up another spawn's output.
         let grid = grids.lock().expect(POISONED).get(&output.pane).cloned();
         if let Some(grid) = grid {
             grid.lock().expect(POISONED).apply(&output.bytes);
@@ -283,19 +232,12 @@ fn route(reader: Box<dyn Read + Send>, grids: &Grids, mut attaching: Handshake, 
     }
 }
 
-/// Leave behind why the reader stopped, for the app to find.
-///
-/// The first reason wins, because a client that has already gone cannot go
-/// again — and the first one is the one that explains the others.
+/// Leave behind why the reader stopped; the first reason wins.
 fn stopped(ended: &Ended, why: String) {
     let _ = ended.set(why);
 }
 
-/// Keep a client from inheriting the session its user is sitting in.
-///
-/// tmux reads these as an attempt to nest a session inside itself and refuses.
-/// The app's own server is not the one they are sitting in — but tmux has no way
-/// to know that, and this is where saying so costs nothing.
+/// Drop `TMUX`/`TMUX_PANE`, which tmux would read as nesting and refuse.
 fn forget_the_users_session(client: &mut CommandBuilder) {
     client.env_remove("TMUX");
     client.env_remove("TMUX_PANE");
@@ -304,20 +246,15 @@ fn forget_the_users_session(client: &mut CommandBuilder) {
 /// Whether there is a client to talk to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Attaching {
-    /// tmux took the client, and everything in the session now streams.
     Attached,
-    /// It did not, and this is what it said about why.
+    /// What tmux said about why not.
     Refused(String),
 }
 
 /// Reading the first thing tmux says, which is whether it attached at all.
 ///
-/// A control client that will not attach is not quiet — it says so and hangs
-/// up. But it says so *inside* the reply to the attach, which looks exactly like
-/// the reply to a command that worked until the last line of it: `%begin`,
-/// whatever there is to say, and then either `%end` or `%error`. Deciding on the
-/// first line alone reads a refusal as a greeting, and the app carries on to a
-/// slot that will stay blank for ever.
+/// A refusal looks exactly like a successful reply until its last line —
+/// `%begin`, then `%end` or `%error` — so the verdict waits for that line.
 struct Handshake {
     /// Where the answer goes, until there is one.
     settling: Option<Sender<Attaching>>,
@@ -340,9 +277,8 @@ impl Handshake {
         };
         let said = String::from_utf8_lossy(line);
 
-        // The `%begin` is wrapped in an escape sequence of its own on the very
-        // first line, so these are looked for anywhere on the line rather than
-        // at the start of it.
+        // The first `%begin` arrives wrapped in an escape sequence, so markers
+        // are looked for anywhere on the line rather than at its start.
         let settled = if said.contains("%end") {
             Attaching::Attached
         } else if said.contains("%error") || said.contains("%exit") {
@@ -370,11 +306,8 @@ pub struct Output {
 }
 
 impl Output {
-    /// Read one line of the client, if it was output at all.
-    ///
-    /// Everything else tmux says — that a window was added, that a command
-    /// finished, that the layout changed — is not output and is skipped. The app
-    /// asks its questions as commands and reads its answers there.
+    /// Read one line of the client, if it was `%output`; every other
+    /// notification is skipped.
     pub fn parse(line: &[u8]) -> Option<Self> {
         let line = trimmed(line);
         let said = line.strip_prefix(b"%output ")?;
@@ -388,11 +321,8 @@ impl Output {
     }
 }
 
-/// A line without the terminator the pty put on it.
-///
-/// The client writes into a terminal, and a terminal turns every newline into a
-/// carriage return and a newline. Left on, that carriage return would reach a
-/// grid as something the spawn drew.
+/// A line without its terminator. The pty turns `\n` into `\r\n`, and a
+/// leftover `\r` would reach a grid as something the spawn drew.
 fn trimmed(line: &[u8]) -> &[u8] {
     let mut end = line.len();
     while end > 0 && (line[end - 1] == b'\n' || line[end - 1] == b'\r') {
@@ -402,12 +332,7 @@ fn trimmed(line: &[u8]) -> &[u8] {
     &line[..end]
 }
 
-/// Turn what tmux escaped back into what the spawn wrote.
-///
-/// Control mode is a line protocol, so anything that could end a line is sent
-/// as three octal digits behind a backslash — and so is the backslash itself,
-/// which is what makes this unambiguous. Everything else, UTF-8 included, is
-/// passed through untouched.
+/// Undo control mode's `\ooo` escaping; everything else passes through.
 fn unescaped(said: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(said.len());
 
@@ -425,11 +350,8 @@ fn unescaped(said: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// One `\ooo` escape, if that is what these four bytes are.
-///
-/// Three octal *digits* and nothing else — a sign or a space would be read as a
-/// number by the usual parse, and turn a backslash the spawn drew into a byte it
-/// never wrote.
+/// One `\ooo` escape, if that is what these four bytes are: exactly three
+/// octal digits — the usual parse would also accept a sign or a space.
 fn octal(escape: Option<&[u8]>) -> Option<u8> {
     let [b'\\', digits @ ..] = escape? else {
         return None;
@@ -535,9 +457,8 @@ mod tests {
         );
     }
 
-    // The rest drives a real tmux and a real pty, on a socket of this test's
-    // own. There is no fake for either: what is being tested is exactly the
-    // part a fake would have to pretend about.
+    // The rest drives a real tmux and a real pty on a private socket; a fake
+    // would have to pretend about exactly the part under test.
 
     /// The shape a test's slot is.
     const SLOT: Size = Size {
@@ -556,20 +477,9 @@ mod tests {
 
     /// A spawn that answers what it is told and is still running afterwards.
     ///
-    /// **The `sleep` is load-bearing, and finding out why cost an afternoon of
-    /// a flaky test.** A pane whose process exits the instant it has written is
-    /// a pane whose last write tmux may never send a control client: the bytes
-    /// reach the pane's own screen — `capture-pane` shows them — but the
-    /// `%output` notification carrying them is dropped along with the pane's
-    /// closing file descriptor. It is a race, so it is intermittent, and under
-    /// load it was hit about half the time.
-    ///
-    /// Nothing about the app depends on that being fixed: a harness is a
-    /// long-running program, and the ladder in [`crate::snapshot`] is what
-    /// reports one that has stopped. What did depend on it was this test, which
-    /// was written to prove that typing arrives and was failing for a reason
-    /// that had nothing to do with typing. The two live tests either side of it
-    /// end in a sleep for the same reason.
+    /// The `sleep` is load-bearing: tmux may drop a pane's last `%output` when
+    /// the process exits right after writing, which made this test flaky. The
+    /// other live tests end in a sleep for the same reason.
     const STILL_THERE_AFTERWARDS: &str = "read -r said; printf 'said %s\\n' \"$said\"; sleep 120";
 
     /// Wait for a grid to say something, or give up and show what it did say.
@@ -617,9 +527,8 @@ mod tests {
         let client = Client::attach(&tmux.server, &session, SLOT).unwrap();
         let pane = tmux.server.open_window(&session, "spawn").unwrap();
 
-        // What the app does, in the order it does it: a grid first, and only
-        // then something to draw into it. Reversing these two lines is the
-        // failure this ordering exists to prevent, and it is silent.
+        // Grid first, then the process: reversing these two lines is the
+        // silent failure this ordering prevents.
         let grid = client.watch(&pane, SLOT);
         tmux.server
             .start(
@@ -631,9 +540,6 @@ mod tests {
         until(&grid, "first thing drawn");
     }
 
-    /// What retiring a spawn leaves behind, which is nothing: the grid is let
-    /// go of, and the pane the app no longer has is one the reader no longer
-    /// routes anything to.
     #[test]
     fn a_pane_the_app_has_let_go_of_has_no_grid_left_behind() {
         let tmux = PrivateTmux::start("control-forgets-a-retired-pane");
@@ -666,14 +572,8 @@ mod tests {
         until(&grid, "said hello");
     }
 
-    /// What makes switching free, against a real tmux.
-    ///
-    /// Two spawns, one of them the app would be drawing and one it would not.
-    /// The one nobody is looking at is not parked, not paused and not caught up
-    /// with afterwards — it keeps running and its output keeps arriving, so its
-    /// grid is already current at the moment somebody selects it. The second
-    /// line it draws is the load-bearing one: it is written a second *after*
-    /// the other spawn's, which is time it spent off screen.
+    /// The second line is the load-bearing one: it is written a second after
+    /// the other spawn's, which is time spent off screen.
     #[test]
     fn a_spawn_the_slot_is_not_showing_keeps_working_and_keeps_arriving() {
         let tmux = PrivateTmux::start("control-spawns-off-screen-keep-going");
@@ -704,16 +604,9 @@ mod tests {
         );
     }
 
-    /// The sharpest risk the design names, and the reason it is not one.
-    ///
-    /// A program asks its terminal where the cursor is and waits for an answer.
-    /// The app's own emulator has no way to reply — and never needs one: tmux is
-    /// the terminal the spawn is really talking to, and it answers before the
-    /// bytes are passed on. Here the spawn asks and nothing else does anything;
-    /// the answer arrives on the pane's own input, and the pane's terminal
-    /// echoes what it is sent, which is how it comes to be on screen at all. An
-    /// answer of the app's own would arrive after this one, as keystrokes
-    /// nobody typed.
+    /// tmux answers a child's terminal queries itself, so the app must never
+    /// write a reply: a second answer would arrive as keystrokes nobody typed.
+    /// This test pins that down.
     #[test]
     fn a_spawn_that_asks_its_terminal_a_question_is_answered_without_the_app() {
         let tmux = PrivateTmux::start("control-terminal-queries-are-answered");
@@ -733,14 +626,8 @@ mod tests {
         );
     }
 
-    /// One `refresh-client` for however many spawns there are.
-    ///
-    /// The windows a control client is not *displaying* are the interesting
-    /// ones: only one spawn is ever in the slot, so if a resize reached only
-    /// the displayed window, every other spawn would be drawing at the old
-    /// shape and would be clipped the moment somebody selected it. The app's
-    /// window changing size is one event about the app, not about any one
-    /// spawn, and this is what makes it land on all of them.
+    /// The windows not being displayed are the interesting ones: a resize that
+    /// missed them would leave spawns drawing at the old shape.
     #[test]
     fn resizing_the_slot_resizes_every_spawn_in_it() {
         const SPAWNS: usize = 4;
@@ -779,11 +666,7 @@ mod tests {
         assert!(refused.is_err(), "attaching to nothing was allowed");
     }
 
-    /// The promise the whole mechanism is for.
-    ///
-    /// Letting go of the client is what quitting the app does to it, so this is
-    /// that moment: the reader stops, the pty closes, and the session and every
-    /// spawn in it carry on because they were never the app's to begin with.
+    /// Letting go of the client is what quitting the app does to it.
     #[test]
     fn letting_go_of_the_client_leaves_every_spawn_running() {
         let tmux = PrivateTmux::start("control-quitting-kills-nothing");
@@ -806,14 +689,8 @@ mod tests {
         );
     }
 
-    /// One reader, several spawns, all drawing at once.
-    ///
-    /// The design names the single reader as the sharpest unknown it introduces
-    /// and asks for it to be measured rather than argued about. This is the
-    /// cheap end of that: every spawn draws something only it could have drawn,
-    /// and every grid has to end up with its own. **It is not twenty fullscreen
-    /// agents** — what it rules out is the reader mixing panes up or dropping
-    /// one under concurrent load, not a throughput ceiling.
+    /// Not a throughput test: it rules out the single reader mixing panes up
+    /// or dropping one under concurrent load, not a ceiling.
     #[test]
     fn one_reader_keeps_several_spawns_apart() {
         const SPAWNS: usize = 8;
