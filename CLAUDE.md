@@ -14,6 +14,10 @@ The five canonical triage roles are used as-is: `needs-triage`, `needs-info`, `r
 
 Documentation is split by audience: `docs/users/` for using the software, `docs/developers/` for how it is built — the map is `docs/developers/README.md`, the vocabulary is `docs/developers/glossary.md`. `docs/tranches/` and `docs/evidence/` are frozen records, never updated to match the code. There are no decision records (no `CONTEXT.md`, no `docs/adr/`) — why lives in issues and PRs. See `docs/agents/domain.md`.
 
+### Writing style
+
+All prose — docs, code comments, commit messages, PR and issue text, and replies to the user in conversation — follows `docs/agents/writing-style.md`: simple declarative sentences, named actors, no metaphors, no personification, no rhetorical devices, bullets for sets and sequences, short factual comments. The current docs and comments are the reference; never drift back to the literary style they replaced.
+
 ## Workflow
 
 ### Pull requests

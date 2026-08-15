@@ -86,6 +86,10 @@ from an external dependency.
 
 ## Writing docs and code here
 
+- Follow the writing style in
+  [`docs/agents/writing-style.md`](../agents/writing-style.md): simple
+  declarative sentences, no metaphors, no personification, short factual
+  comments. The current docs and comments are the reference.
 - Use the [glossary](glossary.md)'s vocabulary. Do not substitute synonyms.
 - Documentation describes what the code does now. The reasons behind past
   decisions live in issues and pull requests. The documents under
