@@ -52,6 +52,8 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
 - Drafts — `+` being written · `>` being made into a spawn
 - Either — `!` it stopped, or would not retire · `▍` the selected row
 - Every spawn — `✻` beside the mark, the harness it is running under
+- Every spawn — its age at the right, how long that status has held (`31m`,
+  `1h4m`); a row too narrow to write its own name in full drops its own age
 - One line each, selected or not; the selected row is painted across the list,
   amber instead of cyan when it is one the app is admitting something about
 

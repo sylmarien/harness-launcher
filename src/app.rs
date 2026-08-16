@@ -783,6 +783,7 @@ mod tests {
     use super::*;
     use crate::snapshot::{Row, Status};
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -815,6 +816,8 @@ mod tests {
                 status,
                 unaccounted: reason.map(|why| snapshot::cannot_account(why, None)),
                 last_known: snapshot::last_read(status),
+                changed: Instant::now(),
+                age: Duration::from_mins(31),
             }],
         }
     }
@@ -931,6 +934,8 @@ mod tests {
     fn a_narrow_list_still_names_the_spawn_and_says_what_the_keyboard_does() {
         let screen = rendered(72, 24);
 
+        // Seventy-two columns leave the list twenty-four, which is not room
+        // for the name and the age together. The age goes, the name stays.
         assert!(screen.contains("add-retry-logic-a7f3"), "{screen}");
         assert!(screen.contains("F10 quits"), "{screen}");
     }

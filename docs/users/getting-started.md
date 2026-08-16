@@ -41,6 +41,11 @@ The form's inputs can also be given on the command line. See
   stays visible.
 - The list marks show status: `·` working, `●` stopped, `?` the app cannot
   tell. A stopped spawn needs you: open it and look.
+- The age at the right of a row is how long that status has held. The row
+  `●✻ fix-worktree-cleanup-dzec 31m` shows a spawn that has been waiting on
+  you for half an hour. Names come first: a row too narrow to write its own
+  name in full drops its own age instead of cutting the name. The rows beside
+  it keep their ages. Widen the terminal to bring the missing ages back.
 - `F9` retires the selected spawn. The session stops and the worktree is
   removed. The branch, with the committed work, is kept. If the worktree has
   uncommitted changes, retiring is refused; clean up and press `F9` again.

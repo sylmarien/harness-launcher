@@ -75,6 +75,28 @@ Three rules carry the design:
   failures. The tie-breaker is not a fourth status; it is check 3 avoiding
   `unknown` when the pane has demonstrably moved on.
 
+## The age of a status
+
+Every row carries an age, which the list draws against its right edge. It is
+the age of the **status**, not of the spawn.
+
+The age answers "how long has this spawn been stopped". That is the question
+that decides where to go next. A spawn started three hours ago and stopped a
+minute ago shows `1m`.
+
+`aged` in `src/snapshot.rs` works it out, from the two things `build` is
+already handed:
+
+- The status is the same as the last snapshot's: the moment it changed is
+  carried forward from that snapshot's row (`Row::changed`).
+- The status is not the same: it changed at `at`, this tick's moment.
+- The last snapshot did not hold the spawn at all: it dates from
+  `Watched::adopted`, the moment the app took charge of it.
+
+`Row::age` is then `at` minus that moment. Neither the snapshot nor the list
+reads a clock of its own: `build` is given the moment, and the list is given
+the age.
+
 ## What a tick reads, and what it costs
 
 The supervisor thread ticks every 200 ms (`TICK` in `src/supervisor.rs`). One

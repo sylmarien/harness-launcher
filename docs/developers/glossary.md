@@ -7,6 +7,9 @@ is not "errored".
 
 Each entry names the component document that owns the concept.
 
+- **age** — how long a spawn's status has held, shown at the right of its row
+  as `4m`, `31m` or `1h4m`. The age of the status, not of the spawn.
+  → [knowing what a spawn is doing](components/knowing-what-a-spawn-is-doing.md)
 - **band** — a painted stripe the app uses to show its own text. Two places:
   the selected row, painted across the full width of the list (gutter
   included); and the top of the slot, where the app writes about the selected

@@ -23,13 +23,13 @@ SPAWNS                           │ ✻ Claude Code
                                  │   dirty spawn refuses instead of deleting
 harness-launcher ●?··            │
 ▍●✻ fix-worktree-cleanup-dzec    │ ⏺ I'll start by reading how retirement
- ?✻ spawn-form-choices-cos1      │   is wired.
- ·✻ add-retry-logic-k81q         │
- ·✻ rate-limit-headers-s2lc      │     Read(src/retirement.rs)
+ ?✻ spawn-form-choices-cos1  1h4m│   is wired.
+ ·✻ add-retry-logic-k81q       4m│
+ ·✻ rate-limit-headers-s2lc   12m│     Read(src/retirement.rs)
                                  │     └─ 214 lines
 acme-api ●··                     │
- ●✻ drop-legacy-auth-0c5f        │ ⏺ The check runs after the process
- ·✻ pagination-cursors-0fko      │   stops, which is right.
+ ●✻ drop-legacy-auth-0c5f    2h1m│ ⏺ The check runs after the process
+ ·✻ pagination-cursors-0fko    8m│   stops, which is right.
  ·✻ ssh-agent-forwarding-hnj5    │
                                  │ Shall I pass --untracked-files=all?
 F2 starts a draft                │
@@ -45,6 +45,8 @@ F10 quits — nothing is killed    │
 - On a real terminal the `▍` row is a painted band. The draft row is pinned
   above the repositories. A captured screen at twenty spawns is in
   `docs/evidence/scale-at-twenty.md` §3.
+- The two twenty-five-character names show no age. Neither fits beside the
+  column at this width, so each keeps the whole row for its name.
 
 ## One frame
 
@@ -87,6 +89,23 @@ flowchart TD
   [the-harness-seam.md](the-harness-seam.md); blank for a draft), a space,
   and the name. Branch and worktree derive from the name and are not shown.
   Overflow is cut with `…`, never wrapped.
+- **The age is drawn at the right of a spawn's row**, right aligned in one
+  column: `4m`, `31m`, `1h4m`. The widest age in the list sizes that column,
+  once, so every row that shows an age cuts its name at the same place and the
+  ages share a right edge. Which rows show one is decided per row: a row shows
+  its age when its own name fits in full beside it. A row whose name would not
+  fit drops its own age and keeps the whole width, and the rows beside it keep
+  theirs. Names come first, and a name is cut only when it overruns the whole
+  row on its own. Every age sizes the column, including the ages of rows that
+  go on to drop them. That can leave the column a cell or two wider than the
+  rows that use it need.
+  A draft has no status, so it has no age, and its title takes the column's
+  room. A spawn absent from the snapshot has no age either, and its name takes
+  the same room. Neither is measured for the column, so a long title on such a
+  row cannot take the ages off the rows beside it. The supervisor works the
+  age out
+  ([knowing-what-a-spawn-is-doing.md](knowing-what-a-spawn-is-doing.md)). The
+  list writes it down and reads no clock.
 - **The selection is held by name, never by position** (`Cursor`): rows
   re-order as statuses change, and a row number would land on a different
   spawn. Movement stops at the ends; no wrap.

@@ -131,8 +131,8 @@ impl Supervisor {
         self.records.forget_all_but(&live);
         self.probes.forget_all_but(&live);
 
-        // The previous snapshot carries each spawn's last readable status; the
-        // ladder is pure and is handed it.
+        // The previous snapshot carries each spawn's last readable status and
+        // the moment its status changed; the ladder is pure and is handed it.
         self.said = snapshot::build(&self.watched, &panes, &evidence, at, &self.said);
 
         self.said.clone()
