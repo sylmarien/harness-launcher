@@ -16,6 +16,7 @@ which file to open.
 | --- | --- |
 | How is the screen drawn? The list, the rows, the slot, the marks? | [components/the-screen.md](components/the-screen.md) |
 | How does typing a description become a running harness? | [components/drafts-and-creation.md](components/drafts-and-creation.md) |
+| Where is the configuration file, and what is a saved project? | [components/drafts-and-creation.md](components/drafts-and-creation.md) |
 | What does tmux do here, and what is control mode? | [components/the-tmux-session.md](components/the-tmux-session.md) |
 | How does the app decide a spawn's status? What does *unaccounted* mean? | [components/knowing-what-a-spawn-is-doing.md](components/knowing-what-a-spawn-is-doing.md) |
 | What happens when a spawn is retired, and when does that refuse? | [components/retirement.md](components/retirement.md) |

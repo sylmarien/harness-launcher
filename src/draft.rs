@@ -18,6 +18,7 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::creation::Wanted;
 use crate::harness::{Choice, Choices};
+use crate::projects::{self, Project};
 use crate::scaffolding::{self, AMBER, DIM, Footer, broken, scroll_offset, wrapped};
 use crate::screen::Size;
 
@@ -138,6 +139,8 @@ pub enum Edit {
 pub struct Drafts {
     /// What the harness offers, asked once so every draft offers the same.
     choices: Vec<Choices>,
+    /// The saved projects, read once so every draft suggests the same.
+    projects: Vec<Project>,
     /// Every draft there is, in the order they were started.
     all: Vec<Draft>,
     /// How many have ever been started. Only counts up, so an identity is
@@ -146,10 +149,12 @@ pub struct Drafts {
 }
 
 impl Drafts {
-    /// No drafts yet, and the choices the ones to come will offer.
-    pub fn new(choices: Vec<Choices>) -> Self {
+    /// No drafts yet, and the choices and saved projects the ones to come will
+    /// offer.
+    pub fn new(choices: Vec<Choices>, projects: Vec<Project>) -> Self {
         Self {
             choices,
+            projects,
             all: Vec::new(),
             started: 0,
         }
@@ -164,7 +169,8 @@ impl Drafts {
     pub fn start(&mut self) -> Id {
         let id = Id(self.started);
         self.started += 1;
-        self.all.push(Draft::new(id, &self.choices));
+        self.all
+            .push(Draft::new(id, &self.choices, self.projects.clone()));
 
         id
     }
@@ -243,8 +249,15 @@ impl Drafts {
 pub struct Draft {
     /// Which draft this is.
     id: Id,
-    /// The repository it would be started against.
+    /// The repository it would be started against, typed as a path or as a
+    /// saved project's name.
     repository: Text,
+    /// The saved projects that field suggests from.
+    projects: Vec<Project>,
+    /// Which suggestion the keyboard has been moved onto, if any. Nothing
+    /// until `Up` or `Down` is pressed, and nothing again once the text
+    /// changes.
+    suggestion: Option<usize>,
     /// What it would be asked to do.
     work: Text,
     /// One picked option per list the harness had something to offer in.
@@ -296,10 +309,12 @@ impl Progress {
 impl Draft {
     /// A blank draft offering these choices. A list with nothing in it is
     /// dropped here, so an empty control never exists at all.
-    fn new(id: Id, choices: &[Choices]) -> Self {
+    fn new(id: Id, choices: &[Choices], projects: Vec<Project>) -> Self {
         Self {
             id,
             repository: Text::line(),
+            projects,
+            suggestion: None,
             work: Text::paragraph(),
             choices: choices.iter().filter_map(Picked::of).collect(),
             on: 0,
@@ -347,10 +362,11 @@ impl Draft {
             }
         }
 
+        let repository = self.resolved(&repository);
         self.progress = Some(Progress::new());
 
         Some(Wanted {
-            repository: PathBuf::from(repository),
+            repository,
             work,
             answers: self.choices.iter().map(Picked::answer).collect(),
         })
@@ -430,7 +446,7 @@ impl Draft {
             Edit::Previous => self.on = (self.on + self.controls() - 1) % self.controls(),
             edit => {
                 let finished = match control(self.on) {
-                    Control::Repository => typed(&mut self.repository, edit),
+                    Control::Repository => self.repository_edited(edit),
                     Control::Work => typed(&mut self.work, edit),
                     Control::Choice(which) => self
                         .choices
@@ -443,6 +459,55 @@ impl Draft {
                 }
             }
         }
+    }
+
+    /// Do to the repository field what the keyboard asked, and say whether the
+    /// field was being finished with.
+    ///
+    /// `Up` and `Down` move through the suggestions, like a list of choices,
+    /// and stop at both ends. They are the only keys that pick one: until one
+    /// of them is pressed, no suggestion is picked, and both start from the
+    /// first. A key that changes the text picks nothing again, because it
+    /// changes which projects the field matches.
+    fn repository_edited(&mut self, edit: Edit) -> bool {
+        let on = self.suggestion.unwrap_or(0);
+        match edit {
+            Edit::Up => self.suggestion = Some(on.saturating_sub(1)),
+            Edit::Down => {
+                let last = self.suggested().len().saturating_sub(1);
+                self.suggestion = Some((on + 1).min(last));
+            }
+            edit => {
+                let finished = typed(&mut self.repository, edit);
+                if matches!(edit, Edit::Typed(_) | Edit::Erased | Edit::Deleted) {
+                    self.suggestion = None;
+                }
+
+                return finished;
+            }
+        }
+
+        false
+    }
+
+    /// The saved projects the repository field's text matches, best first.
+    fn suggested(&self) -> Vec<&Project> {
+        projects::matching(&self.projects, self.repository.text().trim())
+    }
+
+    /// The repository this text stands for. A name typed out in full is that
+    /// project's path, matched the way the suggestions are matched, without
+    /// case. Otherwise only a suggestion the keyboard was moved onto resolves,
+    /// so text matching several projects is left as the path it says it is.
+    fn resolved(&self, typed: &str) -> PathBuf {
+        let matched = self.suggested();
+        let named = typed.to_lowercase();
+
+        matched
+            .iter()
+            .find(|project| project.name.to_lowercase() == named)
+            .or_else(|| self.suggestion.and_then(|at| matched.get(at)))
+            .map_or_else(|| PathBuf::from(typed), |project| project.path.clone())
     }
 
     /// How many controls there are: the two fields, and one per list of choices
@@ -474,6 +539,16 @@ impl Draft {
                     if let Some(at) = field(&mut lines, on_it, REPOSITORY, &self.repository, width)
                     {
                         caret = Some(at);
+                    }
+                    // The suggestions are drawn only while the keyboard is in
+                    // the field, because Up and Down reach them nowhere else.
+                    if on_it {
+                        let suggested = self.suggested();
+                        let names: Vec<&str> = suggested
+                            .iter()
+                            .map(|project| project.name.as_str())
+                            .collect();
+                        lines.extend(marked(&names, self.suggestion));
                     }
                 }
                 Control::Work => {
@@ -743,24 +818,34 @@ impl Picked {
 
     /// Every option, the picked one marked.
     fn options(&self) -> Vec<Line<'static>> {
-        let unmarked = " ".repeat(PICKED.chars().count());
+        let labels: Vec<&str> = self.options.iter().map(|option| option.label).collect();
 
-        self.options
-            .iter()
-            .enumerate()
-            .map(|(at, option)| {
-                let picked = at == self.at;
-                let mark = if picked { PICKED } else { unmarked.as_str() };
-                let how_it_reads = if picked {
-                    scaffolding::HEADING
-                } else {
-                    Style::new()
-                };
-
-                indented(&format!("{mark}{}", option.label), how_it_reads)
-            })
-            .collect()
+        marked(&labels, Some(self.at))
     }
+}
+
+/// Every option of a control, set in under it, with the mark against the one
+/// at `at`. Nothing carries the mark when nothing is picked. Shared by the
+/// harness's lists of choices and the repository field's suggestions, so the
+/// two read the same.
+fn marked(options: &[&str], at: Option<usize>) -> Vec<Line<'static>> {
+    let unmarked = " ".repeat(PICKED.chars().count());
+
+    options
+        .iter()
+        .enumerate()
+        .map(|(which, option)| {
+            let picked = Some(which) == at;
+            let mark = if picked { PICKED } else { unmarked.as_str() };
+            let how_it_reads = if picked {
+                scaffolding::HEADING
+            } else {
+                Style::new()
+            };
+
+            indented(&format!("{mark}{option}"), how_it_reads)
+        })
+        .collect()
 }
 
 /// The form, laid out for the region it is about to be drawn into.
@@ -991,8 +1076,24 @@ pub(crate) mod tests {
         ]
     }
 
+    /// Four saved projects, so a form has something to suggest.
+    fn saved() -> Vec<Project> {
+        [
+            ("Clade", "/code/clade"),
+            ("clang-tools", "/code/clang-tools"),
+            ("somewhere", "/code/somewhere"),
+            ("source", "/code/source"),
+        ]
+        .into_iter()
+        .map(|(name, path)| Project {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        })
+        .collect()
+    }
+
     fn draft() -> Draft {
-        Draft::new(Id(0), &offered())
+        Draft::new(Id(0), &offered(), saved())
     }
 
     fn edited(edits: &[Edit]) -> Draft {
@@ -1011,7 +1112,7 @@ pub(crate) mod tests {
     /// Drafts with these descriptions typed into them. Shared with the list's
     /// tests and the screen's.
     pub fn drafting(work: &[&str]) -> Drafts {
-        let mut drafts = Drafts::new(offered());
+        let mut drafts = Drafts::new(offered(), saved());
 
         for typed in work {
             let id = drafts.start();
@@ -1121,7 +1222,7 @@ F6 / F7 leave it — nothing is lost"
         let mut offered = offered();
         offered[0].options.clear();
 
-        let draft = Draft::new(Id(0), &offered);
+        let draft = Draft::new(Id(0), &offered, saved());
         let screen = drawn(&draft, REGION);
 
         assert!(!screen.contains("Colour"), "{screen}");
@@ -1135,7 +1236,7 @@ F6 / F7 leave it — nothing is lost"
 
     #[test]
     fn a_harness_that_offers_no_choices_at_all_still_gets_a_form() {
-        let screen = drawn(&Draft::new(Id(0), &[]), REGION);
+        let screen = drawn(&Draft::new(Id(0), &[], saved()), REGION);
 
         assert!(screen.contains("Repository"), "{screen}");
         assert!(screen.contains("Work"), "{screen}");
@@ -1181,7 +1282,7 @@ F6 / F7 leave it — nothing is lost"
             },
         }];
 
-        let screen = drawn(&Draft::new(Id(0), &named), REGION);
+        let screen = drawn(&Draft::new(Id(0), &named, saved()), REGION);
 
         assert!(
             screen.contains("Whatever this harness calls it"),
@@ -1374,7 +1475,7 @@ F6 / F7 leave it — nothing is lost"
 
     #[test]
     fn several_drafts_are_several_records_and_nothing_else() {
-        let mut drafts = Drafts::new(offered());
+        let mut drafts = Drafts::new(offered(), saved());
 
         let first = drafts.start();
         let second = drafts.start();
@@ -1390,7 +1491,7 @@ F6 / F7 leave it — nothing is lost"
 
     #[test]
     fn no_two_drafts_are_the_same_draft() {
-        let mut drafts = Drafts::new(offered());
+        let mut drafts = Drafts::new(offered(), saved());
 
         let started: Vec<Id> = (0..3).map(|_| drafts.start()).collect();
 
@@ -1401,7 +1502,7 @@ F6 / F7 leave it — nothing is lost"
 
     /// A draft with a repository and some work in it, ready to be started.
     fn filled_in() -> Drafts {
-        let mut drafts = Drafts::new(offered());
+        let mut drafts = Drafts::new(offered(), saved());
         let id = drafts.start();
         for character in "/code/project".chars() {
             drafts.edit(id, Edit::Typed(character));
@@ -1450,7 +1551,7 @@ F6 / F7 leave it — nothing is lost"
 
     #[test]
     fn a_draft_that_does_not_say_enough_refuses_in_place_and_keeps_every_character() {
-        let mut drafts = Drafts::new(offered());
+        let mut drafts = Drafts::new(offered(), saved());
         let id = drafts.start();
         drafts.edit(id, Edit::Next);
         for character in "add retry logic".chars() {
@@ -1468,7 +1569,7 @@ F6 / F7 leave it — nothing is lost"
 
     #[test]
     fn a_draft_with_nothing_said_about_the_work_is_not_started_either() {
-        let mut drafts = Drafts::new(offered());
+        let mut drafts = Drafts::new(offered(), saved());
         let id = drafts.start();
         for character in "/code/project".chars() {
             drafts.edit(id, Edit::Typed(character));
@@ -1836,12 +1937,179 @@ F6 / F7 leave it — nothing is lost"
 
     #[test]
     fn a_keystroke_aimed_at_a_draft_that_is_not_there_does_nothing() {
-        let mut drafts = Drafts::new(offered());
+        let mut drafts = Drafts::new(offered(), saved());
         let id = drafts.start();
 
         drafts.edit(Id(404), Edit::Typed('a'));
 
         assert_eq!(drafts.of(id).unwrap().repository.text(), "");
         assert!(drafts.of(Id(404)).is_none());
+    }
+
+    /// A draft with this in the repository field and some work under it.
+    fn asking_for(repository: &str) -> Drafts {
+        let mut drafts = Drafts::new(offered(), saved());
+        let id = drafts.start();
+        for character in repository.chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+        drafts.edit(id, Edit::Next);
+        for character in "add retry logic".chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+
+        drafts
+    }
+
+    /// What a draft asking for this repository is started against.
+    fn started_on(repository: &str) -> PathBuf {
+        let mut drafts = asking_for(repository);
+        let id = only(&drafts).id();
+
+        drafts
+            .submit(id)
+            .expect("a draft that says enough")
+            .repository
+    }
+
+    #[test]
+    fn a_saved_project_named_in_the_repository_field_is_started_on_its_path() {
+        assert_eq!(started_on("Clade"), PathBuf::from("/code/clade"));
+        assert_eq!(
+            started_on("clade"),
+            PathBuf::from("/code/clade"),
+            "the name was matched without case in the suggestions and with it here"
+        );
+    }
+
+    /// What a draft is started against when the keyboard was moved onto the
+    /// second suggestion and then left the field by this key.
+    fn started_after_picking(leaving: Edit) -> PathBuf {
+        let mut drafts = Drafts::new(offered(), saved());
+        let id = drafts.start();
+        for character in "cla".chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+        drafts.edit(id, Edit::Down);
+        drafts.edit(id, leaving);
+        for character in "add retry logic".chars() {
+            drafts.edit(id, Edit::Typed(character));
+        }
+
+        drafts
+            .submit(id)
+            .expect("a draft that says enough")
+            .repository
+    }
+
+    #[test]
+    fn a_picked_suggestion_survives_leaving_the_field_by_either_key() {
+        assert_eq!(
+            started_after_picking(Edit::Entered),
+            PathBuf::from("/code/clang-tools"),
+            "Enter dropped the suggestion, and the spawn went to another repository"
+        );
+        assert_eq!(
+            started_after_picking(Edit::Next),
+            PathBuf::from("/code/clang-tools"),
+            "Tab dropped the suggestion, and the spawn went to another repository"
+        );
+    }
+
+    #[test]
+    fn part_of_a_name_with_nothing_picked_is_started_on_as_it_was_typed() {
+        assert_eq!(
+            started_on("cla"),
+            PathBuf::from("cla"),
+            "the form chose between two matches on the user's behalf"
+        );
+    }
+
+    #[test]
+    fn a_relative_path_is_started_on_as_a_path_rather_than_a_name_it_matches() {
+        assert_eq!(
+            started_on("src"),
+            PathBuf::from("src"),
+            "a relative path was resolved to the saved project source"
+        );
+    }
+
+    #[test]
+    fn a_path_typed_out_is_started_on_as_a_path() {
+        assert_eq!(started_on("/code/other"), PathBuf::from("/code/other"));
+    }
+
+    #[test]
+    fn what_is_typed_suggests_the_saved_projects_it_matches() {
+        let screen = drawn(&edited(&typing("cla")), REGION);
+
+        assert!(screen.contains("Clade"), "{screen}");
+        assert!(screen.contains("clang-tools"), "{screen}");
+        assert!(
+            !screen.contains("somewhere"),
+            "a project the text does not match was suggested:\n{screen}"
+        );
+        assert!(
+            !screen.contains("› Clade"),
+            "a suggestion nobody moved onto carries the mark:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_blank_repository_field_suggests_nothing() {
+        let screen = drawn(&draft(), REGION);
+
+        assert!(!screen.contains("Clade"), "{screen}");
+        assert!(!screen.contains("clang-tools"), "{screen}");
+    }
+
+    #[test]
+    fn the_suggestions_are_shown_only_while_the_keyboard_is_in_the_repository_field() {
+        let mut edits = typing("cla");
+        edits.push(Edit::Next);
+
+        let screen = drawn(&edited(&edits), REGION);
+
+        assert!(
+            !screen.contains("clang-tools"),
+            "the form suggests projects for a field the keyboard has left:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_suggestion_the_keyboard_is_on_is_the_one_the_spawn_is_started_on() {
+        let mut drafts = asking_for("cla");
+        let id = only(&drafts).id();
+        drafts.edit(id, Edit::Previous);
+        drafts.edit(id, Edit::Down);
+
+        let wanted = drafts.submit(id).expect("a draft that says enough");
+
+        assert_eq!(wanted.repository, PathBuf::from("/code/clang-tools"));
+    }
+
+    #[test]
+    fn both_ends_of_the_suggestions_stop_rather_than_wrap() {
+        let mut down = typing("cla");
+        down.extend([Edit::Down, Edit::Down, Edit::Down]);
+        let mut up = typing("cla");
+        up.extend([Edit::Down, Edit::Up, Edit::Up]);
+
+        assert!(drawn(&edited(&down), REGION).contains("› clang-tools"));
+        assert!(drawn(&edited(&up), REGION).contains("› Clade"));
+    }
+
+    #[test]
+    fn typing_again_picks_nothing_because_it_changes_what_the_text_matches() {
+        let mut edits = typing("cla");
+        edits.extend([Edit::Down, Edit::Typed('n')]);
+
+        let screen = drawn(&edited(&edits), REGION);
+
+        assert!(screen.contains("clang-tools"), "{screen}");
+        assert!(
+            !screen.contains("› clang-tools"),
+            "a pick made before the text changed still stands:\n{screen}"
+        );
     }
 }

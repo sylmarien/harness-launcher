@@ -47,8 +47,9 @@ knowing whether it is clean.
 
 Every other key goes to whatever is in the slot: to the session, or to the draft.
 
-In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
-`Enter` is a new line in the work and moves on everywhere else.
+In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option or
+a suggested project, `Enter` is a new line in the work and moves on everywhere
+else.
 
 ## Marks in the list
 
@@ -74,6 +75,11 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
   again.
 - Worktrees live under `$XDG_DATA_HOME/harness-launcher/worktrees`
   (`~/.local/share/...` when that is unset).
+- **Projects are saved by hand** in `$XDG_CONFIG_HOME/harness-launcher/config.toml`
+  (`~/.config/...` when that is unset), one `name = "/path"` line under a
+  `[projects]` heading. Type part of a name in the form's Repository field and
+  the matches appear under it. See
+  [docs/users/saved-projects.md](docs/users/saved-projects.md).
 - **A `?` spawn explains itself when you select it** — its pane, the process
   whose status would not resolve, and what the app could last tell — over the top
   of its screen, which is still live underneath. A retirement writes there too:

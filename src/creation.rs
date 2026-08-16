@@ -231,7 +231,7 @@ mod tests {
 
     /// Draft ids, taken from `Drafts` rather than made up.
     fn drafts(how_many: usize) -> Vec<draft::Id> {
-        let mut drafts = draft::Drafts::new(Vec::new());
+        let mut drafts = draft::Drafts::new(Vec::new(), Vec::new());
 
         (0..how_many).map(|_| drafts.start()).collect()
     }

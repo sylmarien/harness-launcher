@@ -63,6 +63,12 @@ Each entry names the component document that owns the concept.
   written, `>` a draft being made into a spawn, `!` stopped or refused,
   `▍` the selected row. Shape and colour are decided together, in one place.
   → [the screen](components/the-screen.md)
+- **project** — a name and a path, saved in the configuration file
+  (`src/projects.rs`). It is not the same thing as the form's **Repository**
+  field, which takes either a saved project's name or a path: a project is the
+  saved pair that lets a name stand in for one. Typing part of the name
+  suggests the projects it matches.
+  → [drafts and creation](components/drafts-and-creation.md)
 - **recipe** — the plain data the harness seam produces for a launch: a
   program, arguments, environment and working directory. The app runs it; the
   seam never does. → [the harness seam](components/the-harness-seam.md)

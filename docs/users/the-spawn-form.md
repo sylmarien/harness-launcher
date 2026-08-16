@@ -16,6 +16,9 @@ The form has three parts:
 
 1. **Repository** — a local git repository, or any directory inside one. A
    draft that names a repository but no work is refused, not guessed at.
+   Typing part of a [saved project](saved-projects.md)'s name suggests the
+   projects it matches. `F5` starts the spawn on the one you moved onto with
+   `↑` or `↓`, or on a name you typed out in full. Anything else is a path.
 2. **The work** — as long as it needs to be. `Enter` inserts a new line here.
 3. **Harness options** — a model and an effort level, picked from lists. The
    choices come from the harness itself, so the form never goes stale.

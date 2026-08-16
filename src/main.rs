@@ -20,6 +20,7 @@ mod list;
 mod litter;
 mod names;
 mod process;
+mod projects;
 mod retirement;
 mod scaffolding;
 mod screen;
@@ -27,6 +28,7 @@ mod snapshot;
 mod supervisor;
 mod tmux;
 mod worktrees;
+mod xdg;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -84,6 +86,7 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
 
     let slot = app::slot_now()?;
     let worktrees = worktrees::root()?;
+    let projects = projects::saved()?;
     let tmux = tmux::Server::app();
 
     let plans: Vec<Plan> = wanted
@@ -129,7 +132,7 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
     };
     // A draft only for an empty list. Somebody who asked for nothing but has
     // spawns from an earlier run lands on those instead.
-    let mut drafts = draft::Drafts::new(harness::choices());
+    let mut drafts = draft::Drafts::new(harness::choices(), projects);
     if spawns.is_empty() {
         drafts.start();
     }

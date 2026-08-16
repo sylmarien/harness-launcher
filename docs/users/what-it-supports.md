@@ -16,6 +16,11 @@ know about.
   from the repository's default branch. Worktrees live under
   `$XDG_DATA_HOME/harness-launcher/worktrees` (`~/.local/share/...` when that
   is unset).
+- **Repositories reachable by name.** A repository written into
+  `$XDG_CONFIG_HOME/harness-launcher/config.toml` (`~/.config/...` when that
+  is unset) becomes a saved project. Typing part of its name in the form
+  suggests the projects that match. A path typed out still works. See
+  [saved projects](saved-projects.md).
 - **Quitting kills nothing.** Sessions outlive the app;
   `tmux -L harness-launcher attach` finds them, and so does the next run. At
   exit the app reports what it left.
@@ -41,6 +46,9 @@ know about.
   the start-up report and left where it is. Only `F9` removes one.
 - **Touch your tmux.** The app runs its own tmux server on its own socket.
   Nothing of the app's appears among your sessions.
+- **Write its own configuration.** Projects are added by editing
+  `config.toml` in a text editor. The app reads that file and never changes
+  it. A file it cannot parse stops it at start-up rather than being ignored.
 
 ## Edge cases
 
