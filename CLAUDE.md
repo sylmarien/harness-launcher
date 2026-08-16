@@ -30,10 +30,11 @@ All prose — docs, code comments, commit messages, PR and issue text, and repli
 
 ### Definition of "finished"
 
-Work is not finished — and no PR is opened — until **`/code-review` has been run over it** and its findings dealt with. The skill pins a fixed point, then spawns one sub-agent per axis so neither review is written by the agent that wrote the code:
+Work is not finished — and no PR is opened — until **`/code-review` has been run over it** and its findings dealt with. The skill pins a fixed point, then spawns one sub-agent per axis so no review is written by the agent that wrote the code. **Three axes, all mandatory, all in parallel:**
 
 - **Standards** — repo coding standards, plus a baseline of Fowler code smells.
 - **Spec** — does the diff match what the originating issue or PRD asked for.
+- **Over-engineering** — `/ponytail-review` over the same diff. The skill only ships two axes; spawn this third sub-agent yourself, alongside the other two, against the same fixed point. Not optional, not a follow-up pass, and not satisfied by Standards' Speculative Generality smell — that one flags abstraction, this one also hunts reinvented stdlib, needless dependencies and dead flexibility.
 
 Then:
 
@@ -44,18 +45,32 @@ Re-run it before any force-push that **changes behaviour**. Amendments that only
 
 ### Skills
 
-All 23 skills in `.claude/skills/` appear below — 22 vendored, plus `/orchestrate`, which is this project's own. This table is a **map, not a licence**: 14 of them are `disable-model-invocation: true` — the user reaches for those, an agent never invokes them unprompted. Within a row, ▸ marks that boundary: everything after it is user-invoked only.
+Two plugins are enabled at project scope in `.claude/settings.json`: **`mattpocock-skills`** (25 engineering and productivity skills) and **`ponytail`** (6 skills). Plugin skills are namespaced — the real invocations are `/mattpocock-skills:tdd` and `/ponytail:ponytail`; the tables below drop the prefix for readability. One skill is this project's own and stays vendored in `.claude/skills/`: `/orchestrate`.
 
-| Phase              | Skills                                                                       |
-| ------------------ | ---------------------------------------------------------------------------- |
-| Design exploration | `/grilling`, `/research`, `/prototype` · ▸ `/grill-me`, `/grill-with-docs`   |
-| Design             | `/codebase-design`, `/domain-modeling` · ▸ `/improve-codebase-architecture`  |
-| Planning           | ▸ `/wayfinder`, `/to-spec`, `/to-tickets`, `/triage`                         |
-| Implementation     | `/tdd`, `/resolving-merge-conflicts` · ▸ `/implement`, `/orchestrate`        |
-| Diagnosis          | `/diagnosing-bugs`                                                           |
-| Review             | `/code-review`                                                               |
-| Meta               | ▸ `/handoff`, `/teach`, `/ask-matt`, `/writing-great-skills`, `/setup-matt-pocock-skills` |
+The first table is a **map, not a licence**: 14 of the 25 are `disable-model-invocation: true` — the user reaches for those, an agent never invokes them unprompted. Within a row, ▸ marks that boundary: everything after it is user-invoked only.
+
+| Phase              | Skills                                                                                        |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| Design exploration | `/grilling`, `/research`, `/prototype` · ▸ `/grill-me`, `/grill-with-docs`                     |
+| Design             | `/codebase-design`, `/domain-modeling` · ▸ `/improve-codebase-architecture`                    |
+| Planning           | ▸ `/wayfinder`, `/to-spec`, `/to-tickets`, `/triage`                                           |
+| Implementation     | `/tdd`, `/resolving-merge-conflicts` · ▸ `/implement`, `/orchestrate`                          |
+| Diagnosis          | `/diagnosing-bugs`                                                                             |
+| Review             | `/code-review`                                                                                 |
+| Meta               | `/wizard`, `/writing-for-agents` · ▸ `/handoff`, `/teach`, `/ask-matt`, `/to-questionnaire`, `/wait-what`, `/setup-matt-pocock-skills` |
 
 **`/orchestrate` runs a queue of issues** — `/orchestrate #36,37,39,41` — one sub-agent implementing each in turn, `/code-review` over every commit, the findings folded back into the commit that caused them, and one pull request that opens on the first commit and grows.
+
+The **`ponytail` plugin** sits underneath those phases rather than in one of them — it governs how much gets built and how tersely it is reported, not which phase you are in. It is the output-verbosity counterpart to `docs/agents/writing-style.md`, which governs the prose register. All six skills are model-invocable:
+
+| Skill                          | What it does                                                                 |
+| ------------------------------ | ---------------------------------------------------------------------------- |
+| `/ponytail [lite\|full\|ultra]` | Lazy-senior-dev mode. Defaults to `full` once activated, persists until `stop ponytail`. |
+| `/ponytail-review`             | Reviews a diff for over-engineering only. **Mandatory third axis of the review gate above** — see the definition of "finished". |
+| `/ponytail-audit`              | Same lens over the whole repo. One-shot report, applies nothing.              |
+| `/ponytail-debt`               | Harvests `ponytail:` comments — the deliberate shortcuts — into a ledger.      |
+| `/ponytail-gain`, `/ponytail-help` | Scoreboard and quick-reference card.                                      |
+
+The plugin also installs three hooks (`SessionStart`, `SubagentStart`, `UserPromptSubmit`) that keep the active mode alive across compaction and sub-agents. They shell out to `node`, so a harness without it on `PATH` loses mode persistence — the skills themselves still work.
 
 **Not covered by any skill:** the PR ritual above — open on finish, never merge, one commit per PR — is prose only, except inside an `/orchestrate` run.
