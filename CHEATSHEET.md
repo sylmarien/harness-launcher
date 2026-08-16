@@ -65,6 +65,10 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
 
 - **Quitting kills nothing.** The sessions outlive the app —
   `tmux -L harness-launcher attach` finds them.
+- **Starting again picks them up.** A session still running is back in the
+  list, unless the start-up report names it as left out. Screens start empty
+  and say so; the app shows only what a spawn has drawn since it started
+  watching.
 - **Retiring** stops the session, removes the worktree and **keeps the branch**.
   It refuses if anything in the worktree is uncommitted: clean up, press `F9`
   again.

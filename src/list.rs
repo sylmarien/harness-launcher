@@ -460,9 +460,12 @@ impl Placed<'_> {
     }
 
     /// How long its status has held, as the list writes it. Nothing at all
-    /// before the first snapshot that holds the spawn.
+    /// before the first snapshot that holds the spawn, and nothing for an
+    /// adopted spawn whose status the app never saw begin.
     fn age(&self) -> String {
-        self.row.map_or_else(String::new, |row| written_as(row.age))
+        self.row
+            .and_then(|row| row.age)
+            .map_or_else(String::new, written_as)
     }
 
     /// Its own line: gutter, status, harness glyph, name, age.
@@ -636,7 +639,7 @@ mod tests {
     /// A row whose status has held this many minutes.
     fn for_minutes(row: Row, minutes: u64) -> Row {
         Row {
-            age: Duration::from_mins(minutes),
+            age: Some(Duration::from_mins(minutes)),
             ..row
         }
     }
@@ -648,8 +651,8 @@ mod tests {
             status,
             unaccounted: reason.map(|why| snapshot::cannot_account(why, None)),
             last_known: snapshot::last_read(status),
-            changed: Instant::now(),
-            age: Duration::ZERO,
+            changed: Some(Instant::now()),
+            age: Some(Duration::ZERO),
         }
     }
 
@@ -1636,6 +1639,28 @@ F10 quits — nothing is kill…"
             .find(|line| line.contains("fix-worktree-cleanup"))
             .unwrap_or_else(|| panic!("the spawn has no row:\n{screen}"));
         assert_eq!(heard_nothing, "  ✻ fix-worktree-cleanup");
+    }
+
+    /// A spawn an earlier run left running has no age: the app was not
+    /// watching when its status began, and `0m` would be a confident lie. It
+    /// keeps the whole width for its name, like a spawn with no row at all.
+    #[test]
+    fn a_spawn_adopted_from_an_earlier_run_shows_no_age_at_all() {
+        let entries = vec![entry("harness-launcher", "add-retry-logic-a7f3")];
+        let snapshot = Snapshot {
+            rows: vec![Row {
+                age: None,
+                ..said("add-retry-logic-a7f3", Status::Unknown, None)
+            }],
+        };
+
+        let screen = drawn(30, 10, &entries, &snapshot, &Cursor::default());
+
+        let row = screen
+            .lines()
+            .find(|line| line.contains("add-retry-logic-a7f3"))
+            .unwrap_or_else(|| panic!("the spawn has no row:\n{screen}"));
+        assert_eq!(row, " ?✻ add-retry-logic-a7f3");
     }
 
     #[test]

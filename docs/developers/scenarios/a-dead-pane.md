@@ -78,3 +78,7 @@ then the pane appears in every `list-panes`; that is the price of
 `remain-on-exit`. See
 [a-retirement-that-refuses.md](a-retirement-that-refuses.md) for the order in
 full.
+
+A dead pane the user never retires outlives the run. The next start-up closes
+it and names it in the start-up report, and leaves its worktree on disk. See
+[starting and leaving](../components/starting-and-leaving.md).

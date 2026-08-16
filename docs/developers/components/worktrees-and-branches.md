@@ -20,9 +20,13 @@ runs. Three files own it: `src/worktrees.rs` (the app-owned root),
   lazily (`worktrees::prepare`) when the first spawn needs it. The worktree's
   own directory is left for `git worktree add` to create: git refuses a path
   that already exists, and that refusal is kept.
-- At start-up the app reads what the root holds and reports it as litter. That
-  report belongs to [starting and leaving](starting-and-leaving.md); the
+- At start-up the app names every directory under the root that no spawn in
+  the list works in, and leaves it there. It removes no worktree at start-up.
+  That report belongs to [starting and leaving](starting-and-leaving.md); the
   walk-through is [litter at startup](../scenarios/litter-at-startup.md).
+- Adoption reads a worktree to work out which repository an earlier run's
+  spawn belongs to: `git::worktree_repository`. It only reads, and it creates
+  no directory.
 
 ## Naming
 

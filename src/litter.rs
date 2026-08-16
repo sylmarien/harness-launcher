@@ -1,123 +1,66 @@
-//! What the app leaves behind, and what it finds.
+//! What the app leaves behind at exit.
 //!
 //! Quitting kills nothing, on purpose: ending agents mid-turn because somebody
 //! closed a viewer would be the most destructive thing this app could do. So
-//! litter is accepted — invisible litter is not. The app reports what it found
-//! at start-up and what it leaves at exit, and a report only states the world:
-//! nothing is adopted, restored or recovered. The looking is
-//! [`Litter::surveyed`]; everything else is pure.
+//! litter is accepted, and invisible litter is not. The report counts what is
+//! still running and claims only what quitting itself did. What the next run
+//! makes of the same litter is [`crate::adoption`]. The looking is
+//! [`surveyed`]; everything else is pure.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::Result;
 use crate::tmux::{self, Server};
-use crate::worktrees;
 
-/// What the app has running and on disk, at one moment.
-pub struct Litter {
-    /// The spawns still running, or `None` when there is no session at all.
-    running: Option<Vec<String>>,
-    /// Where the worktrees go.
-    root: PathBuf,
-    /// What is under it, by name.
-    worktrees: Vec<String>,
+/// The spawns still running, or `None` when there is no session at all.
+///
+/// The only thing in this module that touches anything, and it only reads.
+pub fn surveyed(server: &Server) -> Result<Option<Vec<String>>> {
+    Ok(server.windows()?.map(|windows| {
+        windows
+            .into_iter()
+            .filter(|window| !window.dead)
+            .map(|window| window.name)
+            .collect()
+    }))
 }
 
-impl Litter {
-    /// Look at the world, and say what is there — the only thing in this
-    /// module that touches anything, and it only reads.
-    pub fn surveyed(server: &Server, root: &Path) -> Result<Self> {
-        Ok(Self {
-            running: server.running()?,
-            root: root.to_path_buf(),
-            worktrees: worktrees::under(root),
-        })
-    }
+/// What to say at exit: quitting stopped nothing, what is still running, and
+/// where the worktrees are.
+///
+/// It claims only what quitting itself did — "nothing was stopped" would be
+/// false of any run where a spawn was deliberately retired.
+pub fn leaving(running: Option<&[String]>, root: &Path) -> String {
+    let root = root.display();
 
-    /// What to say at exit: quitting stopped nothing, what is still running,
-    /// and where the worktrees are.
-    ///
-    /// It claims only what quitting itself did — "nothing was stopped" would
-    /// be false of any run where a spawn was deliberately retired.
-    pub fn leaving(&self) -> String {
-        let root = self.root.display();
-
-        let Some(running) = &self.running else {
-            return format!(
-                "quitting stopped nothing, and the tmux session `{}` is no longer there — \
-                 whatever was in it has gone with it. Worktrees are under {root}",
-                tmux::SESSION
-            );
-        };
-
-        if running.is_empty() {
-            return format!(
-                "quitting stopped nothing, and nothing was left running — the tmux session \
-                 `{}` is standing empty. Worktrees are under {root}",
-                tmux::SESSION
-            );
-        }
-
-        format!(
-            "quitting stopped nothing: {}, with worktrees under {root}",
-            still_running(running.len())
-        )
-    }
-
-    /// What to say at start-up, or `None` when there is nothing to say.
-    ///
-    /// Everything is named — the app remembers nothing, so a count would leave
-    /// the reader unable to find any of it — and it ends by saying none of it
-    /// is adopted, because a list of running agents would otherwise read as
-    /// picked up.
-    pub fn found(&self) -> Option<String> {
-        let running: &[String] = self.running.as_deref().unwrap_or_default();
-        if running.is_empty() && self.worktrees.is_empty() {
-            return None;
-        }
-
-        let mut said = vec!["found from an earlier run, and left alone:".to_string()];
-        if !running.is_empty() {
-            said.push(format!(
-                "  {}: {}",
-                still_running(running.len()),
-                running.join(", ")
-            ));
-        }
-        if !self.worktrees.is_empty() {
-            said.push(format!(
-                "  {} under {}: {}",
-                counted(self.worktrees.len(), "worktree", "worktrees"),
-                self.root.display(),
-                self.worktrees.join(", ")
-            ));
-        }
-        said.push(
-            "none of it is adopted — this run starts with an empty list, and \
-             anything above is yours to deal with."
-                .to_string(),
+    let Some(running) = running else {
+        return format!(
+            "quitting stopped nothing, and the tmux session `{}` is no longer there — \
+             whatever was in it has gone with it. Worktrees are under {root}",
+            tmux::SESSION
         );
+    };
 
-        Some(said.join("\n"))
+    if running.is_empty() {
+        return format!(
+            "quitting stopped nothing, and nothing was left running — the tmux session \
+             `{}` is standing empty. Worktrees are under {root}",
+            tmux::SESSION
+        );
     }
-}
 
-/// So many spawns still running in the session, phrased the same way in both
-/// reports.
-fn still_running(how_many: usize) -> String {
+    // Agreement runs past the noun, so both readings are written out.
     format!(
-        "{} still running in the tmux session `{}`",
-        counted(how_many, "spawn is", "spawns are"),
+        "quitting stopped nothing: {} {} still running in the tmux session `{}`, with \
+         worktrees under {root}",
+        running.len(),
+        if running.len() == 1 {
+            "spawn is"
+        } else {
+            "spawns are"
+        },
         tmux::SESSION
     )
-}
-
-/// So many of a thing, without "1 spawns". The caller supplies both readings
-/// because agreement runs past the noun ("1 spawn is" / "2 spawns are").
-fn counted(how_many: usize, one: &str, many: &str) -> String {
-    let thing = if how_many == 1 { one } else { many };
-
-    format!("{how_many} {thing}")
 }
 
 /// Something said when its scope is left, however it is left — an ordinary
@@ -149,7 +92,6 @@ impl<R: FnOnce()> Drop for Leaving<R> {
 mod tests {
     use super::*;
     use std::cell::Cell;
-    use std::fs;
     use std::panic::{self, AssertUnwindSafe};
 
     use tempfile::tempdir;
@@ -165,72 +107,49 @@ mod tests {
         rows: 17,
     };
 
-    /// A survey a test writes rather than takes, so the sentences can be
-    /// pinned without a tmux or a filesystem.
-    fn litter(running: Option<&[&str]>, worktrees: &[&str]) -> Litter {
-        Litter {
-            running: running.map(|names| names.iter().map(|n| (*n).to_string()).collect()),
-            root: PathBuf::from("/data/harness-launcher/worktrees"),
-            worktrees: worktrees.iter().map(|n| (*n).to_string()).collect(),
-        }
-    }
+    /// The exit sentence for a survey a test writes rather than takes, so the
+    /// wording can be pinned without a tmux.
+    fn said(running: Option<&[&str]>) -> String {
+        let running: Option<Vec<String>> =
+            running.map(|names| names.iter().map(|name| (*name).to_string()).collect());
 
-    #[test]
-    fn the_way_in_names_what_it_found_and_says_none_of_it_is_taken_over() {
-        let said = litter(
-            Some(&["add-retry-logic-a7f3"]),
-            &["add-retry-logic-a7f3", "work-1a2b"],
+        leaving(
+            running.as_deref(),
+            Path::new("/data/harness-launcher/worktrees"),
         )
-        .found()
-        .expect("something was found and not reported");
-
-        assert!(said.contains("add-retry-logic-a7f3"), "{said}");
-        assert!(
-            said.contains("work-1a2b"),
-            "a worktree with no session left was not named: {said}"
-        );
-        assert!(said.contains("spawns"), "the session is not named: {said}");
-        assert!(
-            said.contains("/data/harness-launcher/worktrees"),
-            "the worktree root is not given: {said}"
-        );
-        assert!(
-            said.contains("adopt"),
-            "the report does not say that none of this is being taken over: {said}"
-        );
     }
 
     #[test]
-    fn a_survey_reads_the_session_and_the_root_as_they_really_are() {
+    fn a_survey_counts_the_spawns_that_are_really_still_running() {
         let tmux = PrivateTmux::start("litter-surveys-the-world");
         let session = tmux.server.session(SLOT).unwrap();
-        let pane = tmux
+        let going = tmux
             .server
             .open_window(&session, "add-retry-logic-a7f3")
             .unwrap();
-        tmux.server.start(&pane, &tmux.recipe("sleep 120")).unwrap();
-        let somewhere = tempdir().unwrap();
-        let root = somewhere.path().join("worktrees");
-        fs::create_dir_all(root.join("left-from-a-reboot-c3d8")).unwrap();
+        tmux.server
+            .start(&going, &tmux.recipe("sleep 120"))
+            .unwrap();
+        let stopped = tmux
+            .server
+            .open_window(&session, "drop-the-cache-d4e1")
+            .unwrap();
+        tmux.server.start(&stopped, &tmux.recipe("exit 3")).unwrap();
+        tmux.until("#{pane_dead}", |seen| seen.contains('1'));
+        let root = tempdir().unwrap();
 
-        let said = Litter::surveyed(&tmux.server, &root)
-            .unwrap()
-            .found()
-            .expect("a running spawn and a leftover worktree, and nothing said");
+        let running = surveyed(&tmux.server).unwrap();
+        let said = leaving(running.as_deref(), root.path());
 
         assert!(
-            said.contains("add-retry-logic-a7f3"),
-            "the spawn that is really running was not found: {said}"
-        );
-        assert!(
-            said.contains("left-from-a-reboot-c3d8"),
-            "the worktree really on disk was not found: {said}"
+            said.contains("1 spawn is"),
+            "the spawn that is really running was not counted, or the stopped one was: {said}"
         );
     }
 
     #[test]
     fn leaving_nothing_running_reads_as_nothing_rather_than_as_a_count_of_none() {
-        let said = litter(Some(&[]), &[]).leaving();
+        let said = said(Some(&[]));
 
         assert!(!said.contains('0'), "nothing was counted as none: {said}");
         assert!(said.contains("spawns"), "the session is not named: {said}");
@@ -241,41 +160,19 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_with_nothing_left_on_it_hears_nothing_on_the_way_in() {
-        assert_eq!(
-            litter(None, &[]).found(),
-            None,
-            "a machine that has never run this"
-        );
-        assert_eq!(
-            litter(Some(&[]), &[]).found(),
-            None,
-            "a session standing empty was reported as something left behind"
-        );
-    }
-
-    #[test]
     fn one_of_a_thing_reads_as_one_of_a_thing() {
-        let one = litter(Some(&["add-retry-logic-a7f3"]), &["add-retry-logic-a7f3"]);
+        let one = said(Some(&["add-retry-logic-a7f3"]));
 
-        assert!(one.leaving().contains("1 spawn is"), "{}", one.leaving());
+        assert!(one.contains("1 spawn is"), "{one}");
         assert!(
-            !one.leaving().contains("their"),
-            "one spawn was given a plural pronoun: {}",
-            one.leaving()
+            !one.contains("their"),
+            "one spawn was given a plural pronoun: {one}"
         );
-        let found = one.found().unwrap();
-        assert!(found.contains("1 spawn is"), "{found}");
-        assert!(found.contains("1 worktree "), "{found}");
     }
 
     #[test]
     fn the_way_out_names_the_session_counts_the_spawns_and_says_where_the_worktrees_are() {
-        let said = litter(
-            Some(&["add-retry-logic-a7f3", "fix-the-flake-b2c9"]),
-            &["add-retry-logic-a7f3", "fix-the-flake-b2c9"],
-        )
-        .leaving();
+        let said = said(Some(&["add-retry-logic-a7f3", "fix-the-flake-b2c9"]));
 
         assert!(said.contains("spawns"), "the session is not named: {said}");
         assert!(
@@ -291,9 +188,9 @@ mod tests {
     #[test]
     fn the_way_out_claims_only_that_quitting_stopped_nothing() {
         for said in [
-            litter(Some(&["add-retry-logic-a7f3"]), &[]).leaving(),
-            litter(Some(&[]), &[]).leaving(),
-            litter(None, &[]).leaving(),
+            said(Some(&["add-retry-logic-a7f3"])),
+            said(Some(&[])),
+            said(None),
         ] {
             assert!(
                 !said.contains("nothing was stopped"),

@@ -33,8 +33,9 @@ resolves before any probe is considered.
 ## `tmux-list-panes-in-session.txt`
 
 **tmux 3.4**, Linux. The listing both reports are built from — `list-panes`
-scoped to the holding session, printing each pane's *window* name and whether
-what ran in it has stopped. Named for the command that made it rather than for
+scoped to the holding session, printing each pane's *window* name, the pane's
+id, and whether what ran in it has stopped. Start-up adopts from it and the
+exit report counts from it. Named for the command that made it rather than for
 the field it prints, so that it cannot be mistaken for a `list-windows`:
 
 ```
@@ -44,20 +45,23 @@ tmux new-window -d -t spawns -n add-retry-logic-a7f3 -- sh -c 'while :; do sleep
 tmux new-window -d -t spawns -n fix-the-flake-b2c9   -- sh -c 'while :; do sleep 3600; done'
 tmux new-window -d -t spawns -n drop-the-cache-d4e1  -- sh -c 'exit 3'
 tmux new-session -d -s other -x 80 -y 24 -- sleep 300
-tmux list-panes -s -t spawns -F '#{window_name} #{pane_dead}'
+tmux list-panes -s -t spawns -F '#{window_name} #{pane_id} #{pane_dead}'
 ```
+
+The pane's id is in the format because adoption needs it: it is what a grid
+attaches to, and what `kill-pane` takes away.
 
 Three things this pins down that a remembered format would not.
 
-**A window is named after the spawn in it**, which is what lets a report say
-which spawns are still running without the app having to remember them — and is
-the whole reason the reports can be taken by an app that has just started and
-knows nothing.
+**A window is named after the spawn in it**, which is what lets a run say which
+spawns are still running without having to remember them — and is the whole
+reason an app that has just started and knows nothing can take them over.
 
 **The holding window is in the listing too.** It is the furniture that keeps the
 session alive before the first spawn and after the last one stops, and it is
-named `holding` precisely so it can be told apart from a spawn. A report that
-counted it would say one more spawn than there is, for ever.
+named `holding` precisely so it can be told apart from a spawn. A run that
+counted it would say one more spawn than there is, for ever, and would try to
+adopt the furniture.
 
 **`-s -t spawns` is scoped to the session, not the server.** The `other` session
 above was created before this listing was taken and does not appear in it —

@@ -7,8 +7,15 @@ is not "errored".
 
 Each entry names the component document that owns the concept.
 
+- **adoption** — taking a spawn into the list. Two moments use the word: a
+  draft that has become a spawn (`Held::adopt`), and a spawn an earlier run
+  left running that this one picks up at start-up (`adoption::adopt`). Neither
+  asks the user first.
+  → [starting and leaving](components/starting-and-leaving.md)
 - **age** — how long a spawn's status has held, shown at the right of its row
-  as `4m`, `31m` or `1h4m`. The age of the status, not of the spawn.
+  as `4m`, `31m` or `1h4m`. The age of the status, not of the spawn. An
+  adopted spawn has none until its status changes with the app watching: the
+  app was not there when the status began.
   → [knowing what a spawn is doing](components/knowing-what-a-spawn-is-doing.md)
 - **band** — a painted stripe the app uses to show its own text. Two places:
   the selected row, painted across the full width of the list (gutter
@@ -25,7 +32,8 @@ Each entry names the component document that owns the concept.
   → [drafts and creation](components/drafts-and-creation.md)
 - **grace period** — the first 8 seconds after a spawn starts. During it, a
   status record that does not resolve is ignored, so a spawn that is still
-  starting up is not reported as stopped or unknown.
+  starting up is not reported as stopped or unknown. An adopted spawn has
+  none: it wrote its record before this run started.
   → [knowing what a spawn is doing](components/knowing-what-a-spawn-is-doing.md)
 - **grid** — one spawn's screen, held in the app's memory. The control client
   keeps every grid current, whether or not that spawn is displayed. A grid is
@@ -46,8 +54,10 @@ Each entry names the component document that owns the concept.
   → [the tmux session](components/the-tmux-session.md)
 - **litter** — what the app leaves in the world when it exits or dies: the
   tmux session, worktrees, branches. Litter is accepted but always reported —
-  at exit and at the next start-up. It is never adopted or cleaned up
-  automatically. → [starting and leaving](components/starting-and-leaving.md)
+  at exit and at the next start-up. The next run adopts the spawns still
+  running that it can describe and closes the panes whose spawns have stopped;
+  it removes no worktree.
+  → [starting and leaving](components/starting-and-leaving.md)
 - **mark** — the one-character glyph in the gutter showing a row's state:
   `·` working, `●` stopped, `?` unknown, `-` being retired, `+` a draft being
   written, `>` a draft being made into a spawn, `!` stopped or refused,

@@ -21,7 +21,7 @@ which file to open.
 | What happens when a spawn is retired, and when does that refuse? | [components/retirement.md](components/retirement.md) |
 | Where do worktrees live, how are they named, what survives? | [components/worktrees-and-branches.md](components/worktrees-and-branches.md) |
 | Which code knows what the app launches, and what keeps that contained? | [components/the-harness-seam.md](components/the-harness-seam.md) |
-| What happens at start-up and at exit? What is litter? | [components/starting-and-leaving.md](components/starting-and-leaving.md) |
+| What happens at start-up and at exit? What survives a close and reopen? What is litter? | [components/starting-and-leaving.md](components/starting-and-leaving.md) |
 | What runs on which thread, and what crosses a channel? | [components/concurrency.md](components/concurrency.md) |
 | What does a word mean here? | [glossary.md](glossary.md) |
 | How do I build, lint, and test this? | [working-on-the-project.md](working-on-the-project.md) |
@@ -60,6 +60,9 @@ true:
   those things.
 - **Litter is accepted; invisible litter is not.** The app may leave things
   behind, but always says so.
+- **The app never destroys work it did not make.** It closes a pane whose
+  process has already stopped. It removes a worktree only on the user's key,
+  after a cleanliness check. Start-up removes none.
 - **Nothing has a fixed size.** Every dimension is computed from the real
   terminal, every frame.
 - **Missing features are scope, not architecture.** Where a simplification

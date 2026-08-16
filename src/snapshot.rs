@@ -51,20 +51,32 @@ impl Status {
 pub struct Watched {
     /// The spawn's name, which is also its row's.
     pub name: String,
-    /// The pane holding it. Always known: the app split that pane itself.
+    /// The pane holding it. Always known: the app either opened that pane or
+    /// read its id off the session at start-up.
     pub pane: String,
-    /// When the app took charge of it. The grace period counts from here, and
-    /// so does the age of a status the app has never seen change.
-    pub adopted: Instant,
+    /// When the app started watching it, and nothing for a spawn an earlier
+    /// run left running. The grace period counts from here, and so does the
+    /// age of a status the app has never seen change.
+    watching_since: Option<Instant>,
 }
 
 impl Watched {
-    /// Start watching a spawn, from now.
+    /// Start watching a spawn this run started, from now.
     pub fn new(name: String, pane: String) -> Self {
         Self {
             name,
             pane,
-            adopted: Instant::now(),
+            watching_since: Some(Instant::now()),
+        }
+    }
+
+    /// Start watching a spawn an earlier run left running: no `watching_since`,
+    /// so no grace period and no age.
+    pub fn already_running(name: String, pane: String) -> Self {
+        Self {
+            name,
+            pane,
+            watching_since: None,
         }
     }
 
@@ -153,10 +165,13 @@ pub struct Row {
     pub last_known: Option<Status>,
     /// When [`Row::status`] last changed. Carried across the ticks that left
     /// it alone, so the next tick works out the age from this snapshot alone.
-    pub changed: Instant,
-    /// How long the status had held when the snapshot was taken. The list
-    /// draws this, which is why the list needs no clock.
-    pub age: Duration,
+    /// Nothing for an adopted spawn whose status has not changed since: the
+    /// app was not watching when it began.
+    pub changed: Option<Instant>,
+    /// How long the status had held when the snapshot was taken, and nothing
+    /// where the app cannot say. The list draws this, which is why the list
+    /// needs no clock.
+    pub age: Option<Duration>,
 }
 
 /// The `last_known` the ladder would put on a row of this status, so a
@@ -221,17 +236,19 @@ pub fn build(
 ///
 /// [`climb`] dates every row to this tick. A status the last snapshot already
 /// showed carries the moment it changed forward instead. A spawn the last
-/// snapshot did not hold dates from when the app took charge of it.
+/// snapshot did not hold dates from when the app started watching it — which
+/// an adopted spawn has no answer to, so it has no age until its status
+/// changes under the app's own eyes.
 fn aged(row: Row, spawn: &Watched, at: Instant, before: &Snapshot) -> Row {
     let changed = match before.of(&row.name) {
         Some(was) if was.status == row.status => was.changed,
-        Some(_) => at,
-        None => spawn.adopted,
+        Some(_) => Some(at),
+        None => spawn.watching_since,
     };
 
     Row {
         changed,
-        age: at.saturating_duration_since(changed),
+        age: changed.map(|changed| at.saturating_duration_since(changed)),
         ..row
     }
 }
@@ -247,7 +264,7 @@ struct Whereabouts<'a> {
 
 impl Whereabouts<'_> {
     /// Unknown, with the sentence that says why.
-    fn unknown(&self, at: Instant, why: String) -> Row {
+    fn unknown(&self, why: String) -> Row {
         Row {
             name: self.spawn.name.clone(),
             status: Status::Unknown,
@@ -258,8 +275,8 @@ impl Whereabouts<'_> {
                 last_known: self.last_known,
             }),
             last_known: self.last_known,
-            changed: at,
-            age: Duration::ZERO,
+            changed: None,
+            age: None,
         }
     }
 
@@ -269,7 +286,7 @@ impl Whereabouts<'_> {
     /// carried forward untouched.
     fn settle(&self, at: Instant, why: String) -> Row {
         if past_grace(self.spawn, at) {
-            return self.unknown(at, why);
+            return self.unknown(why);
         }
 
         Row {
@@ -277,27 +294,28 @@ impl Whereabouts<'_> {
             status: Status::Working,
             unaccounted: None,
             last_known: self.last_known,
-            changed: at,
-            age: Duration::ZERO,
+            changed: None,
+            age: None,
         }
     }
 }
 
 /// A status worked out from evidence, which is therefore also the last one
 /// read.
-fn read(spawn: &Watched, status: Status, at: Instant) -> Row {
+fn read(spawn: &Watched, status: Status) -> Row {
     Row {
         name: spawn.name.clone(),
         status,
         unaccounted: None,
         last_known: Some(status),
-        changed: at,
-        age: Duration::ZERO,
+        changed: None,
+        age: None,
     }
 }
 
 /// The ladder itself, for one spawn. A missing pane is unknown from the first
 /// tick: the grace period covers an unwritten record, not tmux losing a pane.
+/// The age is left blank; [`aged`] works it out from the last snapshot.
 fn climb(
     spawn: &Watched,
     panes: &Panes,
@@ -314,13 +332,10 @@ fn climb(
             pid: None,
             last_known,
         }
-        .unknown(
-            at,
-            "the app cannot find the pane it was running in".to_string(),
-        );
+        .unknown("the app cannot find the pane it was running in".to_string());
     };
     if pane.dead {
-        return read(spawn, Status::Stopped, at);
+        return read(spawn, Status::Stopped);
     }
     let whereabouts = Whereabouts {
         spawn,
@@ -333,13 +348,13 @@ fn climb(
     };
 
     match &evidence.reading {
-        Reading::Working => read(spawn, Status::Working, at),
-        Reading::Stopped => read(spawn, Status::Stopped, at),
+        Reading::Working => read(spawn, Status::Working),
+        Reading::Stopped => read(spawn, Status::Stopped),
         Reading::Unresolved(why) => match &evidence.foreground {
             // The tie-breaker can only change the answer to stopped, never to
             // working — and a failed probe never counts as the agent being
             // gone.
-            Some(Foreground::SomethingElse) => read(spawn, Status::Stopped, at),
+            Some(Foreground::SomethingElse) => read(spawn, Status::Stopped),
             Some(Foreground::Unreadable(trouble)) => whereabouts.settle(
                 at,
                 format!("{why}, and the probe that would settle it failed: {trouble}"),
@@ -350,9 +365,12 @@ fn climb(
 }
 
 /// Whether the grace period is over. Defined once: the supervisor asks the
-/// same question to decide when the tie-breaker is worth running.
+/// same question to decide when the tie-breaker is worth running. An adopted
+/// spawn is past it from the first tick.
 pub fn past_grace(spawn: &Watched, at: Instant) -> bool {
-    at.saturating_duration_since(spawn.adopted) >= GRACE
+    spawn
+        .watching_since
+        .is_none_or(|since| at.saturating_duration_since(since) >= GRACE)
 }
 
 #[cfg(test)]
@@ -372,9 +390,11 @@ mod tests {
         Watched {
             name: "add-retry-logic-a7f3".to_string(),
             pane: pane.to_string(),
-            adopted: Instant::now()
-                .checked_sub(GRACE * 2)
-                .expect("a machine that has been up for longer than a grace period"),
+            watching_since: Some(
+                Instant::now()
+                    .checked_sub(GRACE * 2)
+                    .expect("a machine that has been up for longer than a grace period"),
+            ),
         }
     }
 
@@ -628,14 +648,15 @@ mod tests {
 
     #[test]
     fn the_word_a_starting_spawn_is_taken_at_is_not_a_status_the_app_read() {
-        let spawn = Watched::new("add-retry-logic-a7f3".to_string(), ALIVE.to_string());
+        let started = Instant::now();
+        let spawn = watched_from(started);
         let panes = Panes::parse(CAPTURED);
 
         let starting = build(
             from_ref(&spawn),
             &panes,
             &found(unresolved(), None),
-            spawn.adopted,
+            started,
             &Snapshot::default(),
         );
         assert_eq!(
@@ -648,7 +669,7 @@ mod tests {
             from_ref(&spawn),
             &panes,
             &found(unresolved(), None),
-            spawn.adopted + GRACE,
+            started + GRACE,
             &starting,
         );
 
@@ -766,8 +787,8 @@ mod tests {
                         Some(Status::Working),
                     )),
                     last_known: Some(Status::Working),
-                    changed: Instant::now(),
-                    age: Duration::from_mins(31),
+                    changed: Some(Instant::now()),
+                    age: Some(Duration::from_mins(31)),
                 })
                 .collect(),
         };
@@ -787,20 +808,20 @@ mod tests {
         );
     }
 
-    /// The same spawn, adopted at exactly this moment, so a test can name the
-    /// ages it expects.
-    fn adopted_at(at: Instant) -> Watched {
+    /// The same spawn, watched from exactly this moment, so a test can name
+    /// the ages it expects.
+    fn watched_from(at: Instant) -> Watched {
         Watched {
             name: "add-retry-logic-a7f3".to_string(),
             pane: ALIVE.to_string(),
-            adopted: at,
+            watching_since: Some(at),
         }
     }
 
     #[test]
     fn a_status_that_holds_grows_older_every_tick() {
         let started = Instant::now();
-        let spawn = adopted_at(started);
+        let spawn = watched_from(started);
         let panes = Panes::parse(CAPTURED);
         let working = found(Reading::Working, None);
 
@@ -819,10 +840,10 @@ mod tests {
             &first,
         );
 
-        assert_eq!(first.of(&spawn.name).unwrap().age, Duration::ZERO);
+        assert_eq!(first.of(&spawn.name).unwrap().age, Some(Duration::ZERO));
         assert_eq!(
             later.of(&spawn.name).unwrap().age,
-            Duration::from_mins(10),
+            Some(Duration::from_mins(10)),
             "a status that did not change was reported as new"
         );
     }
@@ -830,7 +851,7 @@ mod tests {
     #[test]
     fn a_status_changing_starts_the_age_again() {
         let started = Instant::now();
-        let spawn = adopted_at(started);
+        let spawn = watched_from(started);
         let panes = Panes::parse(CAPTURED);
 
         let working = build(
@@ -857,19 +878,19 @@ mod tests {
 
         assert_eq!(
             stopped.of(&spawn.name).unwrap().age,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             "the age is of the spawn rather than of what it is doing"
         );
         assert_eq!(
             still_stopped.of(&spawn.name).unwrap().age,
-            Duration::from_mins(5)
+            Some(Duration::from_mins(5))
         );
     }
 
     #[test]
-    fn a_spawn_the_last_snapshot_did_not_hold_is_as_old_as_the_apps_charge_of_it() {
+    fn a_spawn_the_last_snapshot_did_not_hold_is_as_old_as_the_watch_on_it() {
         let started = Instant::now();
-        let spawn = adopted_at(started);
+        let spawn = watched_from(started);
 
         let first = build(
             from_ref(&spawn),
@@ -881,8 +902,44 @@ mod tests {
 
         assert_eq!(
             first.of(&spawn.name).unwrap().age,
-            Duration::from_mins(2),
-            "a spawn adopted two minutes ago was reported as brand new"
+            Some(Duration::from_mins(2)),
+            "a spawn watched for two minutes was reported as brand new"
+        );
+    }
+
+    /// The age is how long a status has held. A spawn an earlier run left
+    /// running was holding its status before the app started, so the app has
+    /// no answer until it sees the status change for itself.
+    #[test]
+    fn an_adopted_spawns_age_starts_at_the_first_change_the_app_sees() {
+        let taken_over =
+            Watched::already_running("add-retry-logic-a7f3".to_string(), ALIVE.to_string());
+        let panes = Panes::parse(CAPTURED);
+        let started = Instant::now();
+
+        let working = build(
+            from_ref(&taken_over),
+            &panes,
+            &found(Reading::Working, None),
+            started,
+            &Snapshot::default(),
+        );
+        let stopped = build(
+            from_ref(&taken_over),
+            &panes,
+            &found(Reading::Stopped, None),
+            started + Duration::from_mins(10),
+            &working,
+        );
+
+        assert_eq!(
+            working.of(&taken_over.name).unwrap().age,
+            None,
+            "a spawn running since an earlier run was given an age the app cannot know"
+        );
+        assert_eq!(
+            stopped.of(&taken_over.name).unwrap().age,
+            Some(Duration::ZERO)
         );
     }
 

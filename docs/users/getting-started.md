@@ -29,8 +29,9 @@ instead. Either way the binary needs nothing from the source tree afterwards.
 harness-launcher
 ```
 
-The app opens with nothing running: a blank draft in the slot, an empty list
-beside it. Then:
+On a machine with nothing running, the app opens with a blank draft in the
+slot and an empty list beside it. Sessions an earlier run left going are in
+the list instead, bar any the start-up report names as left out. Then:
 
 1. Enter a local git repository, or any directory inside one.
 2. Enter what you want done, in your own words.
@@ -61,7 +62,7 @@ The form's inputs can also be given on the command line. See
   removed. The branch, with the committed work, is kept. If the worktree has
   uncommitted changes, retiring is refused; clean up and press `F9` again.
 - `F10` quits. Every session keeps running, and the app reports what it left
-  and where.
+  and where. Start it again and it picks those sessions back up.
 
 [`CHEATSHEET.md`](../../CHEATSHEET.md) is the one-page version of this.
 [What it supports](what-it-supports.md) lists limits and edge cases.

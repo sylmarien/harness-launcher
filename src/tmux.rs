@@ -50,9 +50,20 @@ const HOLDER: [&str; 3] = ["sh", "-c", "while :; do sleep 3600; done"];
 /// disappears.
 const PANE_FORMAT: &str = "#{pane_id} #{pane_dead} #{pane_pid} #{pane_tty}";
 
-/// What the reports ask about every window: the spawn's name, and whether
-/// what ran in it has stopped.
-const WINDOW_FORMAT: &str = "#{window_name} #{pane_dead}";
+/// What both reports ask about every window: the spawn's name, the pane to
+/// adopt or close, and whether what ran in it has stopped.
+const WINDOW_FORMAT: &str = "#{window_name} #{pane_id} #{pane_dead}";
+
+/// One spawn the session is holding, as tmux reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    /// The spawn's name, which the window carries.
+    pub name: String,
+    /// The pane it runs in.
+    pub pane: String,
+    /// Whether what ran in it has stopped.
+    pub dead: bool,
+}
 
 /// One pane, as tmux reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,16 +204,18 @@ impl Server {
         Ok(())
     }
 
-    /// The spawns still running, or `None` when there is no session at all.
-    /// `has-session` is checked first so reporting never creates the session
-    /// it reports on; no server is an answer, not a refusal. Scoped with `-s`
-    /// to the app's own session.
-    pub fn running(&self) -> Result<Option<Vec<String>>> {
+    /// Every spawn the session holds, stopped ones included, or `None` when
+    /// there is no session at all.
+    ///
+    /// `has-session` is checked first so asking never creates the session it
+    /// asks about; no server is an answer, not a refusal. Scoped with `-s` to
+    /// the app's own session.
+    pub fn windows(&self) -> Result<Option<Vec<Window>>> {
         if !process::run("tmux", &self.with_socket(&["has-session", "-t", SESSION]))?.ok {
             return Ok(None);
         }
 
-        Ok(Some(running_in(&self.run(&[
+        Ok(Some(windows_in(&self.run(&[
             "list-panes",
             "-s",
             "-t",
@@ -238,21 +251,26 @@ impl Server {
     }
 }
 
-/// Which spawns a window listing says are still running. The holding window
-/// is furniture, a dead pane is a stopped spawn kept by `remain-on-exit`,
-/// and a line that does not parse is dropped, as in [`Panes::parse`].
-fn running_in(listing: &str) -> Vec<String> {
+/// Which spawns a window listing holds. The holding window is furniture and
+/// is dropped; a line that does not parse is dropped too, as in
+/// [`Panes::parse`].
+fn windows_in(listing: &str) -> Vec<Window> {
     listing
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let name = fields.next()?;
+            let pane = fields.next()?;
             let dead = fields.next()?;
-            if name == HOLDING || dead == DEAD {
+            if name == HOLDING {
                 return None;
             }
 
-            Some(name.to_string())
+            Some(Window {
+                name: name.to_string(),
+                pane: pane.to_string(),
+                dead: dead == DEAD,
+            })
         })
         .collect()
 }
@@ -376,34 +394,39 @@ pub(crate) mod tests {
 
     #[test]
     fn the_spawns_a_session_is_holding_are_read_off_the_windows_they_are_in() {
-        let spawns = running_in(CAPTURED_IN_SESSION);
+        let spawns = windows_in(CAPTURED_IN_SESSION);
 
-        assert!(
-            spawns.contains(&"add-retry-logic-a7f3".to_string()),
-            "{spawns:?}"
+        assert_eq!(
+            spawns[0],
+            Window {
+                name: "add-retry-logic-a7f3".to_string(),
+                pane: "%1".to_string(),
+                dead: false,
+            }
         );
-        assert!(
-            spawns.contains(&"fix-the-flake-b2c9".to_string()),
-            "{spawns:?}"
-        );
+        assert_eq!(spawns[1].name, "fix-the-flake-b2c9");
     }
 
     #[test]
     fn the_window_holding_the_session_open_is_not_one_of_the_spawns() {
-        let spawns = running_in(CAPTURED_IN_SESSION);
-
-        assert!(!spawns.contains(&HOLDING.to_string()), "{spawns:?}");
-    }
-
-    #[test]
-    fn a_spawn_that_has_stopped_is_not_one_of_the_ones_still_running() {
-        let spawns = running_in(CAPTURED_IN_SESSION);
+        let spawns = windows_in(CAPTURED_IN_SESSION);
 
         assert!(
-            !spawns.contains(&"drop-the-cache-d4e1".to_string()),
-            "a spawn whose window is only being kept by remain-on-exit was \
-             counted as running: {spawns:?}"
+            !spawns.iter().any(|window| window.name == HOLDING),
+            "{spawns:?}"
         );
+    }
+
+    /// A stopped spawn stays in the listing: it is the pane adoption closes.
+    #[test]
+    fn a_spawn_that_has_stopped_is_listed_as_stopped_rather_than_dropped() {
+        let spawns = windows_in(CAPTURED_IN_SESSION);
+
+        let stopped = spawns
+            .iter()
+            .find(|window| window.name == "drop-the-cache-d4e1")
+            .expect("a spawn kept by remain-on-exit was dropped from the listing");
+        assert!(stopped.dead, "{stopped:?}");
     }
 
     #[test]
@@ -607,11 +630,11 @@ pub(crate) mod tests {
     fn a_machine_holding_nothing_has_no_session_to_report() {
         let tmux = PrivateTmux::start("nothing-is-held");
 
-        assert_eq!(tmux.server.running().unwrap(), None);
+        assert_eq!(tmux.server.windows().unwrap(), None);
     }
 
     #[test]
-    fn a_session_holding_spawns_reports_the_ones_still_running() {
+    fn a_session_holding_spawns_names_each_one_with_the_pane_it_is_in() {
         let tmux = PrivateTmux::start("reports-what-is-running");
         let session = tmux.server.session(SLOT).unwrap();
         let going = tmux
@@ -628,25 +651,35 @@ pub(crate) mod tests {
         tmux.server.start(&stopped, &tmux.recipe("exit 3")).unwrap();
         tmux.until("#{pane_dead}", |seen| seen.contains('1'));
 
-        let running = tmux.server.running().unwrap().expect("a session to report");
+        let windows = tmux.server.windows().unwrap().expect("a session to report");
 
         assert_eq!(
-            running,
-            ["add-retry-logic-a7f3"],
-            "the report is not the spawns that are still going"
+            windows,
+            [
+                Window {
+                    name: "add-retry-logic-a7f3".to_string(),
+                    pane: going,
+                    dead: false,
+                },
+                Window {
+                    name: "drop-the-cache-d4e1".to_string(),
+                    pane: stopped,
+                    dead: true,
+                },
+            ]
         );
     }
 
     #[test]
-    fn asking_what_is_running_leaves_it_exactly_as_it_was() {
+    fn asking_what_the_session_holds_leaves_it_exactly_as_it_was() {
         let tmux = PrivateTmux::start("asking-changes-nothing");
         let shape = "#{window_name} #{pane_id} #{pane_dead}";
 
-        assert_eq!(tmux.server.running().unwrap(), None);
+        assert_eq!(tmux.server.windows().unwrap(), None);
         assert_eq!(
-            tmux.server.running().unwrap(),
+            tmux.server.windows().unwrap(),
             None,
-            "asking what was running is what brought a session into existence"
+            "asking what the session held is what brought it into existence"
         );
 
         let session = tmux.server.session(SLOT).unwrap();
@@ -657,12 +690,12 @@ pub(crate) mod tests {
         tmux.server.start(&pane, &tmux.recipe("sleep 120")).unwrap();
         let before = tmux.panes(shape);
 
-        tmux.server.running().unwrap();
+        tmux.server.windows().unwrap();
 
         assert_eq!(
             tmux.panes(shape),
             before,
-            "asking what was running changed what is running"
+            "asking what the session held changed what is running"
         );
     }
 

@@ -6,6 +6,7 @@
 //! processes and draws nothing — so quitting the app kills nothing. The README
 //! and `docs/` carry the full picture.
 
+mod adoption;
 mod app;
 mod cli;
 mod control;
@@ -33,7 +34,7 @@ use std::process::ExitCode;
 use crate::cli::Invocation;
 use crate::creation::{Plan, Wanted};
 use crate::error::{Error, Result};
-use crate::litter::{Leaving, Litter};
+use crate::litter::Leaving;
 use crate::tmux::Server;
 
 /// What this app calls itself when it is talking to a shell; said from three
@@ -71,6 +72,9 @@ fn run() -> Result<()> {
 /// the control-mode client is attached before any harness starts, because it
 /// streams only what is produced while attached — a session that drew first
 /// would leave a slot that stays blank forever.
+///
+/// Adoption runs before this run's own spawns start, so the list reads in the
+/// order the spawns were made.
 fn spawn(wanted: &[Wanted]) -> Result<()> {
     // Only when there is something to start: an app asked to start nothing has
     // created nothing to leave behind, and the same check runs on any draft.
@@ -82,12 +86,11 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
     let worktrees = worktrees::root()?;
     let tmux = tmux::Server::app();
 
-    say_what_was_found(&tmux, &worktrees)?;
-
     let plans: Vec<Plan> = wanted
         .iter()
         .map(|wanted| creation::plan(wanted, &worktrees))
         .collect::<Result<_>>()?;
+    let created: Vec<String> = plans.iter().map(|plan| plan.entry.spawn.clone()).collect();
     create(&plans)?;
 
     // From here on this run has agents that outlive it, so every way out —
@@ -98,8 +101,15 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
     let session = tmux.session(slot)?;
     let client = control::Client::attach(&tmux, &session, slot)?;
 
+    let adopted = adoption::adopt(&tmux, &client, &worktrees, slot)?;
+    say_what_was_found(&adopted, &worktrees, &created);
+
     let mut spawns = Vec::new();
     let mut watched = Vec::new();
+    for started in adopted.started {
+        watched.push(started.watched);
+        spawns.push(started.spawn);
+    }
     for plan in plans {
         let started = creation::start(&tmux, &session, &client, slot, plan)?;
 
@@ -117,7 +127,8 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
         leaving: watching.leaving,
         worktrees: worktrees.clone(),
     };
-    // A draft only for somebody who asked for nothing.
+    // A draft only for an empty list. Somebody who asked for nothing but has
+    // spawns from an earlier run lands on those instead.
     let mut drafts = draft::Drafts::new(harness::choices());
     if spawns.is_empty() {
         drafts.start();
@@ -127,20 +138,15 @@ fn spawn(wanted: &[Wanted]) -> Result<()> {
     app::run(&mut held, &world)
 }
 
-/// Say what an earlier run left behind, once, before this one makes anything —
-/// a moment later this run's own worktrees would be reported as leftovers.
+/// Say what an earlier run left behind, and what this one made of it.
 ///
-/// Nothing is adopted: the report states the world, and this run carries on
-/// with an empty list. Accepted cost: it lands on the shell just before the
-/// alternate screen covers it, so it is read on the way out; whether to hold
-/// it back is left open in
+/// Accepted cost: it lands on the shell just before the alternate screen
+/// covers it, so it is read at exit. Whether to hold it back is left open in
 /// `docs/developers/components/starting-and-leaving.md`.
-fn say_what_was_found(tmux: &Server, worktrees: &Path) -> Result<()> {
-    if let Some(report) = Litter::surveyed(tmux, worktrees)?.found() {
+fn say_what_was_found(adopted: &adoption::Adopted, worktrees: &Path, created: &[String]) {
+    if let Some(report) = adopted.found(worktrees, created) {
         println!("{SAID}: {report}");
     }
-
-    Ok(())
 }
 
 /// Say what this run is leaving behind on its way out.
@@ -149,8 +155,8 @@ fn say_what_was_found(tmux: &Server, worktrees: &Path) -> Result<()> {
 /// surprise. Taken from the world rather than the app's own list, which can be
 /// stale by now. A failed survey is said out loud rather than swallowed.
 fn say_what_is_left(tmux: &Server, worktrees: &Path) {
-    match Litter::surveyed(tmux, worktrees) {
-        Ok(litter) => println!("{SAID}: {}", litter.leaving()),
+    match litter::surveyed(tmux) {
+        Ok(running) => println!("{SAID}: {}", litter::leaving(running.as_deref(), worktrees)),
         Err(why) => {
             eprintln!("{SAID}: could not say what is still running, and something is: {why}");
         }

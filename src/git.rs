@@ -125,6 +125,51 @@ pub fn default_branch(repository: &Repository) -> Result<String> {
         })
 }
 
+/// The repository a worktree belongs to.
+///
+/// The path must be a worktree root of its own. `rev-parse --show-toplevel`
+/// hands back the repository root for any other directory inside a
+/// repository, and a row filed under that repository sits under the wrong
+/// heading.
+///
+/// The repository itself is the main worktree, the first entry `worktree
+/// list` prints. A linked worktree's toplevel names the worktree, not the
+/// repository. A submodule's first entry is its git directory, which [`open`]
+/// resolves back to the submodule's working tree.
+pub fn worktree_repository(worktree: &Path) -> Result<Repository> {
+    let at = path_argument(worktree)?;
+    let toplevel = process::run("git", &["-C", at, "rev-parse", "--show-toplevel"])?;
+    if !toplevel.ok || !same_directory(Path::new(&toplevel.stdout), worktree) {
+        return Err(Error::new(format!(
+            "{at} is not the root of a worktree of its own, so git names no repository for it"
+        )));
+    }
+
+    let listed = process::run_ok("git", &["-C", at, "worktree", "list", "--porcelain"])?;
+
+    let main = listed
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("worktree "))
+        .ok_or_else(|| {
+            Error::new(format!(
+                "git listed no worktree around {}",
+                worktree.display()
+            ))
+        })?;
+
+    open(Path::new(main))
+}
+
+/// Whether two paths name the same directory. Both sides are resolved first:
+/// a worktree root reached through a symlink is still that root.
+fn same_directory(one: &Path, other: &Path) -> bool {
+    match (one.canonicalize(), other.canonicalize()) {
+        (Ok(one), Ok(other)) => one == other,
+        _ => false,
+    }
+}
+
 /// Create a worktree on a branch of its own.
 ///
 /// Always `-b`, never the bare form: bare silently checks out a pre-existing
@@ -429,6 +474,129 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(branch, "spawn/add-retry-logic-a7f3");
+    }
+
+    #[test]
+    fn a_worktree_says_which_repository_it_belongs_to() {
+        let root = repository_with_origin();
+        let repository = open(&clone_path(&root)).unwrap();
+        let worktree = root.path().join("worktrees").join("add-retry-logic-a7f3");
+        add_worktree(
+            &repository,
+            &worktree,
+            "spawn/add-retry-logic-a7f3",
+            "origin/main",
+        )
+        .unwrap();
+
+        assert_eq!(worktree_repository(&worktree).unwrap(), repository);
+    }
+
+    /// A directory under the worktree root that is no worktree of its own
+    /// still sits inside a repository, and `worktree list` names that
+    /// repository. The list groups rows by repository, so filing the spawn
+    /// there puts its row under the wrong heading.
+    #[test]
+    fn a_directory_inside_a_repository_that_is_no_worktree_of_its_own_is_refused() {
+        let root = repository_with_origin();
+        let inside = clone_path(&root)
+            .join("worktrees")
+            .join("add-retry-logic-a7f3");
+        fs::create_dir_all(&inside).unwrap();
+
+        let named = worktree_repository(&inside);
+
+        let refused = match named {
+            Err(refused) => refused.to_string(),
+            Ok(repository) => panic!(
+                "a plain directory was filed under {:?}, the repository around it",
+                repository.name()
+            ),
+        };
+        assert!(
+            refused.contains("worktree"),
+            "the refusal does not say what was checked: {refused}"
+        );
+    }
+
+    /// A submodule keeps its git directory in its superproject, and that
+    /// directory is the first entry `worktree list` prints. It resolves back
+    /// to the submodule's own working tree, so the repository is named and
+    /// nothing is refused.
+    #[test]
+    fn a_submodule_is_named_by_its_own_working_tree() {
+        let root = tempdir().unwrap();
+        let library = root.path().join("lib");
+        let library = library.to_str().unwrap();
+        git(&["init", "-b", "main", library]);
+        git(&["-C", library, "commit", "--allow-empty", "-m", "first"]);
+        let superproject = root.path().join("super");
+        git(&["init", "-b", "main", superproject.to_str().unwrap()]);
+        git(&[
+            "-c",
+            "protocol.file.allow=always",
+            "-C",
+            superproject.to_str().unwrap(),
+            "submodule",
+            "add",
+            library,
+            "vendor/lib",
+        ]);
+
+        let named = worktree_repository(&superproject.join("vendor").join("lib")).unwrap();
+
+        assert_eq!(named.name(), "lib");
+    }
+
+    /// `--separate-git-dir` puts a repository's git directory outside its
+    /// working tree, and that directory is the first entry `worktree list`
+    /// prints. It has no working tree of its own, so no repository can be
+    /// named and the spawn is refused.
+    #[test]
+    fn a_worktree_whose_git_directory_sits_elsewhere_is_refused_rather_than_filed_under_a_neighbour()
+     {
+        let root = tempdir().unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        git(&["init", "-b", "main", elsewhere.to_str().unwrap()]);
+        let project = root.path().join("project");
+        git(&[
+            "init",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            elsewhere.join("project.git").to_str().unwrap(),
+            project.to_str().unwrap(),
+        ]);
+        let project = project.to_str().unwrap();
+        git(&["-C", project, "commit", "--allow-empty", "-m", "first"]);
+        let worktree = root.path().join("worktrees").join("add-retry-logic-a7f3");
+        git(&[
+            "-C",
+            project,
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            "spawn/add-retry-logic-a7f3",
+            worktree.to_str().unwrap(),
+            "main",
+        ]);
+
+        let named = worktree_repository(&worktree);
+
+        assert!(
+            named.is_err(),
+            "the spawn was filed under {:?}, which is the repository around its git \
+             directory rather than the one it works in",
+            named.map(|repository| repository.name().to_string())
+        );
+    }
+
+    #[test]
+    fn a_directory_that_is_no_worktree_belongs_to_no_repository() {
+        let nowhere = tempdir().unwrap();
+
+        assert!(worktree_repository(nowhere.path()).is_err());
     }
 
     /// The guard: anything added to creation that writes the repository's

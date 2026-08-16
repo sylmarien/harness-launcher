@@ -816,8 +816,8 @@ mod tests {
                 status,
                 unaccounted: reason.map(|why| snapshot::cannot_account(why, None)),
                 last_known: snapshot::last_read(status),
-                changed: Instant::now(),
-                age: Duration::from_mins(31),
+                changed: Some(Instant::now()),
+                age: Some(Duration::from_mins(31)),
             }],
         }
     }
