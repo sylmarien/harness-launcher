@@ -53,4 +53,6 @@ know about.
   instrumentation, not your agent. Select the spawn to see the full account
   over its screen. The session underneath is often still running.
 - **One harness.** Claude Code is the only harness it launches today.
-- **Run from source.** Start with `cargo run`; there is no installer yet.
+- **One install route.** `cargo install` builds it from source. The project
+  ships no prebuilt binaries and no system packages. The build needs a Rust
+  toolchain. The installed binary does not need one.

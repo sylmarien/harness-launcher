@@ -3,11 +3,15 @@
 ## Run
 
 ```
-cargo run                    # opens on a blank form — write the work there
-cargo run -- <repository> "<the work>" [--model <id>] [--level <id>]
-cargo run -- <repository> "<the work>" --and <other-repository> "<more work>"
-cargo run -- --help          # the models and effort levels on offer
+harness-launcher             # opens on a blank form — write the work there
+harness-launcher <repository> "<the work>" [--model <id>] [--level <id>]
+harness-launcher <repository> "<the work>" --and <other-repository> "<more work>"
+harness-launcher --help      # the models and effort levels on offer
 ```
+
+Install it with `cargo install --path .` from a clone, or
+`cargo install --git https://github.com/sylmarien/harness-launcher` without
+one. In the source tree, `cargo run -- <arguments>` runs the same CLI.
 
 `<repository>` is a local git repository, or any directory inside one. `--and`
 separates one spawn from the next. With no arguments the app opens with nothing

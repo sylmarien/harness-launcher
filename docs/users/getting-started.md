@@ -1,21 +1,32 @@
 # Getting started
 
-From a clone to a running spawn in about a minute.
+From nothing installed to a running spawn in about a minute.
 
 ## Prerequisites
 
 - **git** — the app works on ordinary local git repositories.
 - **tmux** — the app drives tmux headlessly; you never see it. Tested against
   tmux 3.4.
-- **Rust** — via [rustup](https://rustup.rs). The toolchain is pinned in
-  `rust-toolchain.toml` and installs itself on the first `cargo` call.
+- **Rust 1.88 or newer** — via [rustup](https://rustup.rs). `cargo install`
+  builds with your default toolchain. Inside a clone, rustup instead applies
+  the pin in `rust-toolchain.toml` and installs it on the first `cargo` call.
 - **Claude Code** — `claude` on your `PATH`, authenticated. The app starts
   sessions; it does not log you in.
+
+## Install it
+
+```
+cargo install --git https://github.com/sylmarien/harness-launcher
+```
+
+That builds a release binary and puts it in `~/.cargo/bin`, which rustup
+already added to your `PATH`. From a clone, run `cargo install --path .`
+instead. Either way the binary needs nothing from the source tree afterwards.
 
 ## Run it
 
 ```
-cargo run
+harness-launcher
 ```
 
 The app opens with nothing running: a blank draft in the slot, an empty list
