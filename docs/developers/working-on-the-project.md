@@ -17,6 +17,14 @@ cargo test
 - The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on the
   first `cargo` call. Dependabot opens a PR when stable moves past the pin,
   so the bump arrives with CI already run on it.
+- `rust-version` in `Cargo.toml` declares the oldest rustc the project builds
+  under, so cargo refuses an older toolchain before it compiles anything.
+
+## The release build
+
+`cargo install --path .` builds in release mode and puts `harness-launcher` in
+`~/.cargo/bin`. Users install the same way — see
+[getting started](../users/getting-started.md).
 
 ## Formatting: no `rustfmt.toml`, on purpose
 

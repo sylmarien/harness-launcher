@@ -61,11 +61,14 @@ Three rules carry the design:
   grace period: tmux knows its own panes immediately, so the app's handle must
   be wrong. See [a dead pane](../scenarios/a-dead-pane.md).
 - **The grace period gates checks 3 and 4** (`GRACE`, eight seconds from
-  `Watched::adopted`; `past_grace` is the one shared answer). Inside it, an
-  unresolved spawn is reported as *working* on trust, and no probe runs, so
-  *still starting* cannot become *stopped* or *unknown*. Without the grace
-  period, every new spawn would spend its first seconds showing the one status
-  meant to signal a real problem.
+  `Watched::watching_since`; `past_grace` is the one shared answer). Inside
+  it, an unresolved spawn is reported as *working* on trust, and no probe
+  runs, so *still starting* cannot become *stopped* or *unknown*. Without the
+  grace period, every new spawn would spend its first seconds showing the one
+  status meant to signal a real problem. **A spawn adopted from an earlier run
+  has no grace period** (`Watched::already_running`): it wrote its record long
+  before this run, so trusting it as *working* would hide a spawn waiting for
+  the user.
 - **The tie-breaker can only change the answer to stopped, never to working.**
   It asks what holds the pane's terminal (`ps`, read by `holding` in
   `src/supervisor.rs`; `harness::names_the_harness` recognises the harness). A
@@ -74,6 +77,35 @@ Three rules carry the design:
   the agent being gone: the ladder falls through to **unknown**, carrying both
   failures. The tie-breaker is not a fourth status; it is check 3 avoiding
   `unknown` when the pane has demonstrably moved on.
+
+## The age of a status
+
+Every row carries an age, which the list draws against its right edge. It is
+the age of the **status**, not of the spawn.
+
+The age answers "how long has this spawn been stopped". That is the question
+that decides where to go next. A spawn started three hours ago and stopped a
+minute ago shows `1m`.
+
+`aged` in `src/snapshot.rs` works it out, from the two things `build` is
+already handed:
+
+- The status is the same as the last snapshot's: the moment it changed is
+  carried forward from that snapshot's row (`Row::changed`).
+- The status is not the same: it changed at `at`, this tick's moment.
+- The last snapshot did not hold the spawn at all: it dates from
+  `Watched::watching_since`, the moment the app started watching it.
+
+`Row::age` is then `at` minus that moment. Neither the snapshot nor the list
+reads a clock of its own: `build` is given the moment, and the list is given
+the age.
+
+**A spawn adopted from an earlier run has no age.** It has no
+`watching_since`, because the app was not there when the status began. A spawn
+running for three hours would otherwise show `0m`. `Row::age` is `None` and
+the row keeps the whole width for its name, the way a spawn the app has heard
+nothing about does. The first status change the app sees starts the age, and
+from there the spawn ages like any other.
 
 ## What a tick reads, and what it costs
 

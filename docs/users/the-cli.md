@@ -1,7 +1,7 @@
 # The command line
 
 Everything the spawn form accepts can be given on the command line.
-`cargo run -- --help` prints the current version of this reference. The help
+`harness-launcher --help` prints the current version of this reference. The help
 text and the app read the same definitions, so they cannot drift apart.
 
 ```
@@ -22,8 +22,8 @@ harness-launcher <repository> <work> [options]
 own options:
 
 ```
-cargo run -- ~/code/api "add rate-limit headers" --model sonnet \
-       --and ~/code/web "fix the flaky login test" --level max
+harness-launcher ~/code/api "add rate-limit headers" --model sonnet \
+                 --and ~/code/web "fix the flaky login test" --level max
 ```
 
 A separator is required because bare pairs are ambiguous: an unquoted

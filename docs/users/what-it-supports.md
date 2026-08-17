@@ -16,10 +16,19 @@ know about.
   from the repository's default branch. Worktrees live under
   `$XDG_DATA_HOME/harness-launcher/worktrees` (`~/.local/share/...` when that
   is unset).
+- **Repositories reachable by name.** A repository written into
+  `$XDG_CONFIG_HOME/harness-launcher/config.toml` (`~/.config/...` when that
+  is unset) becomes a saved project. Typing part of its name in the form
+  suggests the projects that match. A path typed out still works. See
+  [saved projects](saved-projects.md).
 - **Quitting kills nothing.** Sessions outlive the app;
-  `tmux -L harness-launcher attach` finds them. At exit the app reports what
-  it left. At start-up it reports sessions from earlier runs and adopts none
-  of them.
+  `tmux -L harness-launcher attach` finds them, and so does the next run. At
+  exit the app reports what it left.
+- **The next run picks them back up.** A session still running from an earlier
+  run is in the list again, with no prompt and nothing to confirm. Its screen
+  starts empty and says so: the app can only show what a spawn has drawn since
+  it started watching. A session whose worktree git cannot name a repository
+  for is left running and named in the start-up report instead.
 - **Refusal over guessing.** A dirty worktree refuses to retire. An
   unresolvable repository refuses to spawn. No refusal loses what you typed.
 
@@ -30,11 +39,16 @@ know about.
   branch. The branch is the product.
 - **Guess why an agent stopped.** Finished, waiting for you, or dead all show
   as stopped. You open the spawn and look.
-- **Recover between runs.** Each run starts with an empty list. Earlier
-  sessions keep running and are reported, but the app does not re-attach to
-  them.
+- **Bring back what a spawn drew before.** A picked-up spawn's screen starts
+  empty. The model and effort it was started with are gone too: nothing on
+  disk records them.
+- **Tidy up your worktrees.** A worktree left by an earlier run is named in
+  the start-up report and left where it is. Only `F9` removes one.
 - **Touch your tmux.** The app runs its own tmux server on its own socket.
   Nothing of the app's appears among your sessions.
+- **Write its own configuration.** Projects are added by editing
+  `config.toml` in a text editor. The app reads that file and never changes
+  it. A file it cannot parse stops it at start-up rather than being ignored.
 
 ## Edge cases
 
@@ -53,4 +67,6 @@ know about.
   instrumentation, not your agent. Select the spawn to see the full account
   over its screen. The session underneath is often still running.
 - **One harness.** Claude Code is the only harness it launches today.
-- **Run from source.** Start with `cargo run`; there is no installer yet.
+- **One install route.** `cargo install` builds it from source. The project
+  ships no prebuilt binaries and no system packages. The build needs a Rust
+  toolchain. The installed binary does not need one.

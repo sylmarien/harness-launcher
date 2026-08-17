@@ -21,7 +21,8 @@ the app exits. Commands are in `src/tmux.rs`; the output stream is in
 - One extra window named `holding` runs the holder. It only keeps the session
   alive before the first spawn and after the last one stops: tmux discards a
   session with no windows, which would also drop the control client's
-  attachment. The reports filter it out (`running_in`).
+  attachment. `Server::windows` filters it out, so neither adoption nor the
+  exit report counts it as a spawn.
 
 ```mermaid
 flowchart LR

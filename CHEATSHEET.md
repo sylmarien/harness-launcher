@@ -3,11 +3,15 @@
 ## Run
 
 ```
-cargo run                    # opens on a blank form — write the work there
-cargo run -- <repository> "<the work>" [--model <id>] [--level <id>]
-cargo run -- <repository> "<the work>" --and <other-repository> "<more work>"
-cargo run -- --help          # the models and effort levels on offer
+harness-launcher             # opens on a blank form — write the work there
+harness-launcher <repository> "<the work>" [--model <id>] [--level <id>]
+harness-launcher <repository> "<the work>" --and <other-repository> "<more work>"
+harness-launcher --help      # the models and effort levels on offer
 ```
+
+Install it with `cargo install --path .` from a clone, or
+`cargo install --git https://github.com/sylmarien/harness-launcher` without
+one. In the source tree, `cargo run -- <arguments>` runs the same CLI.
 
 `<repository>` is a local git repository, or any directory inside one. `--and`
 separates one spawn from the next. With no arguments the app opens with nothing
@@ -43,8 +47,9 @@ knowing whether it is clean.
 
 Every other key goes to whatever is in the slot: to the session, or to the draft.
 
-In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
-`Enter` is a new line in the work and moves on everywhere else.
+In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option or
+a suggested project, `Enter` is a new line in the work and moves on everywhere
+else.
 
 ## Marks in the list
 
@@ -52,6 +57,8 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
 - Drafts — `+` being written · `>` being made into a spawn
 - Either — `!` it stopped, or would not retire · `▍` the selected row
 - Every spawn — `✻` beside the mark, the harness it is running under
+- Every spawn — its age at the right, how long that status has held (`31m`,
+  `1h4m`); a row too narrow to write its own name in full drops its own age
 - One line each, selected or not; the selected row is painted across the list,
   amber instead of cyan when it is one the app is admitting something about
 
@@ -59,11 +66,20 @@ In a draft: `Tab` / `Shift-Tab` move between fields, `↑` `↓` pick an option,
 
 - **Quitting kills nothing.** The sessions outlive the app —
   `tmux -L harness-launcher attach` finds them.
+- **Starting again picks them up.** A session still running is back in the
+  list, unless the start-up report names it as left out. Screens start empty
+  and say so; the app shows only what a spawn has drawn since it started
+  watching.
 - **Retiring** stops the session, removes the worktree and **keeps the branch**.
   It refuses if anything in the worktree is uncommitted: clean up, press `F9`
   again.
 - Worktrees live under `$XDG_DATA_HOME/harness-launcher/worktrees`
   (`~/.local/share/...` when that is unset).
+- **Projects are saved by hand** in `$XDG_CONFIG_HOME/harness-launcher/config.toml`
+  (`~/.config/...` when that is unset), one `name = "/path"` line under a
+  `[projects]` heading. Type part of a name in the form's Repository field and
+  the matches appear under it. See
+  [docs/users/saved-projects.md](docs/users/saved-projects.md).
 - **A `?` spawn explains itself when you select it** — its pane, the process
   whose status would not resolve, and what the app could last tell — over the top
   of its screen, which is still live underneath. A retirement writes there too:

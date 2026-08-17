@@ -783,6 +783,7 @@ mod tests {
     use super::*;
     use crate::snapshot::{Row, Status};
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -815,6 +816,8 @@ mod tests {
                 status,
                 unaccounted: reason.map(|why| snapshot::cannot_account(why, None)),
                 last_known: snapshot::last_read(status),
+                changed: Some(Instant::now()),
+                age: Some(Duration::from_mins(31)),
             }],
         }
     }
@@ -931,6 +934,8 @@ mod tests {
     fn a_narrow_list_still_names_the_spawn_and_says_what_the_keyboard_does() {
         let screen = rendered(72, 24);
 
+        // Seventy-two columns leave the list twenty-four, which is not room
+        // for the name and the age together. The age goes, the name stays.
         assert!(screen.contains("add-retry-logic-a7f3"), "{screen}");
         assert!(screen.contains("F10 quits"), "{screen}");
     }
@@ -1484,7 +1489,7 @@ mod tests {
 
     /// The whole screen, as this cursor leaves it, with nothing being drafted.
     fn showing(spawns: &Spawns, cursor: &Cursor) -> String {
-        with_drafts(spawns, &Drafts::new(Vec::new()), cursor)
+        with_drafts(spawns, &Drafts::new(Vec::new(), Vec::new()), cursor)
     }
 
     /// The whole screen, drafts and all.
@@ -1703,7 +1708,7 @@ mod tests {
     #[test]
     fn starting_a_draft_is_what_puts_it_in_the_slot() {
         let spawns = several();
-        let mut drafts = Drafts::new(Vec::new());
+        let mut drafts = Drafts::new(Vec::new(), Vec::new());
 
         let cursor = Cursor::on_draft(drafts.start());
 
@@ -1997,7 +2002,7 @@ mod tests {
 
     /// Everything the app is holding, with three spawns and nothing drafted.
     fn holding() -> Held {
-        Held::new(several(), Drafts::new(Vec::new()))
+        Held::new(several(), Drafts::new(Vec::new(), Vec::new()))
     }
 
     #[test]

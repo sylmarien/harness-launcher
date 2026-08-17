@@ -8,10 +8,15 @@
 //! [`shown_as`], so the list survives a colour-blind reader.
 //!
 //! Every entry is one line, selected or not; text that does not fit is cut,
-//! never wrapped. The selected row is painted as a full-width band, not just
-//! marked. The selection is held by name, never by position, because rows
-//! re-order as statuses change. Scrolling to rows the selection is not on is
-//! still an open design question.
+//! never wrapped. A spawn's row ends with the age of its status, right
+//! aligned in a column the whole list shares. A row shows its age only when
+//! its own name fits in full beside it, so no name is cut to make room for an
+//! age. The selected row is painted as a full-width band, not just marked.
+//! The selection is held by name, never by position, because rows re-order as
+//! statuses change. Scrolling to rows the selection is not on is still an
+//! open design question.
+
+use std::time::Duration;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -207,6 +212,8 @@ impl<'a> Listing<'a> {
     fn rows(&self, width: usize) -> Rows {
         let mut lines = vec![Line::styled("SPAWNS", HEADING), Line::raw("")];
         let mut selected = None;
+        let groups = grouped(self.entries, self.snapshot, self.retirements);
+        let age_cells = age_column(&groups);
 
         for draft in self.drafts {
             let on_it = self.cursor.draft() == Some(draft.id());
@@ -216,10 +223,7 @@ impl<'a> Listing<'a> {
             lines.push(drafted(draft, on_it, width));
         }
 
-        for (at, group) in grouped(self.entries, self.snapshot, self.retirements)
-            .iter()
-            .enumerate()
-        {
+        for (at, group) in groups.iter().enumerate() {
             if at > 0 || !self.drafts.is_empty() {
                 lines.push(Line::raw(""));
             }
@@ -230,7 +234,7 @@ impl<'a> Listing<'a> {
                 if on_it {
                     selected = Some((lines.len(), lines.len()));
                 }
-                lines.push(placed.row(on_it, width));
+                lines.push(placed.row(on_it, width, age_cells));
             }
         }
 
@@ -269,29 +273,75 @@ fn drafted(draft: &Draft, on_it: bool, width: usize) -> Line<'static> {
         }
     };
 
-    lined(&shown, NOTHING_YET, &draft.title(), on_it, width)
+    lined(&shown, NOTHING_YET, &draft.title(), "", on_it, width, None)
 }
 
-/// One row, whatever it stands for: gutter, mark, harness column, name.
+/// How wide the age column is, or nothing at all when no row has an age.
+///
+/// The widest age the list is about to draw decides it, once, for every row.
+/// So the ages line up. Which rows show an age is then [`lined`]'s call, one
+/// row at a time. Every age sizes the column, including the ages of rows that
+/// go on to drop them. That can leave the column a cell or two wider than the
+/// rows that use it need.
+fn age_column(groups: &[Group<'_>]) -> Option<usize> {
+    groups
+        .iter()
+        .flat_map(|group| &group.spawns)
+        .map(|placed| placed.age().chars().count())
+        .filter(|age| *age > 0)
+        .max()
+}
+
+/// One row, whatever it stands for: gutter, mark, harness column, name, and
+/// the age against the right edge.
 ///
 /// Padded out to the full width of the list, so a selected row's band spans
-/// the row rather than highlighting the name.
+/// the row rather than highlighting the name. `age_cells` is the column
+/// [`age_column`] sized for the whole list, so every row that shows an age
+/// cuts its name at the same place and the ages share a right edge. A row
+/// shows its age only when its own name fits in full beside it. A row whose
+/// name does not fit drops its own age and keeps the whole width, and so does
+/// a row with no age: no name is ever cut to make room for an age.
 fn lined(
     shown: &Shown,
     runs_under: &'static str,
     name: &str,
+    age: &str,
     on_it: bool,
     width: usize,
+    age_cells: Option<usize>,
 ) -> Line<'static> {
     let how_it_reads = shown.reading(on_it);
     let room = width.saturating_sub(INDENT);
+    let beside = age_cells
+        .filter(|_| !age.is_empty())
+        .map(|cells| (room.saturating_sub(cells + 1), cells))
+        .filter(|(named, _)| name.chars().count() <= *named);
+    let (named, tail) = match beside {
+        Some((named, cells)) => (named, format!(" {age:>cells$}")),
+        None => (room, String::new()),
+    };
 
     Line::from(vec![
         gutter(on_it, how_it_reads),
         Span::styled(shown.mark, how_it_reads),
         Span::styled(runs_under, how_it_reads),
-        Span::styled(format!(" {:<room$}", elided(name, room)), how_it_reads),
+        Span::styled(
+            format!(" {:<named$}{tail}", elided(name, named)),
+            how_it_reads,
+        ),
     ])
+}
+
+/// An age as the list writes it: `4m`, `31m`, `1h4m`. A minute is the finest
+/// unit, and the hours are not capped at a day.
+fn written_as(age: Duration) -> String {
+    let minutes = age.as_secs() / 60;
+
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes}m"),
+        (hours, minutes) => format!("{hours}h{minutes}m"),
+    }
 }
 
 impl Widget for Listing<'_> {
@@ -409,12 +459,29 @@ impl Placed<'_> {
         self.shown().span()
     }
 
-    /// Its own line: gutter, status, harness glyph, name.
+    /// How long its status has held, as the list writes it. Nothing at all
+    /// before the first snapshot that holds the spawn, and nothing for an
+    /// adopted spawn whose status the app never saw begin.
+    fn age(&self) -> String {
+        self.row
+            .and_then(|row| row.age)
+            .map_or_else(String::new, written_as)
+    }
+
+    /// Its own line: gutter, status, harness glyph, name, age.
     ///
     /// The branch and the worktree are deliberately absent: both are
     /// derivable from the name, which the row keeps.
-    fn row(&self, selected: bool, width: usize) -> Line<'static> {
-        lined(&self.shown(), GLYPH, self.name(), selected, width)
+    fn row(&self, selected: bool, width: usize, age_cells: Option<usize>) -> Line<'static> {
+        lined(
+            &self.shown(),
+            GLYPH,
+            self.name(),
+            &self.age(),
+            selected,
+            width,
+            age_cells,
+        )
     }
 }
 
@@ -528,6 +595,8 @@ mod tests {
     use crate::draft::tests::drafting;
     use crate::scaffolding::SELECTED;
     use crate::snapshot;
+    use std::time::Instant;
+
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
@@ -553,25 +622,37 @@ mod tests {
         ]
     }
 
-    /// What the supervisor would have said about those five.
+    /// What the supervisor would have said about those five, with an age
+    /// apiece: one of every shape the list writes.
     fn saying(reason: Option<&str>) -> Snapshot {
         Snapshot {
             rows: vec![
-                said("add-retry-logic", Status::Working, None),
-                said("fix-worktree-cleanup", Status::Stopped, None),
-                said("spawn-form-choices", Status::Unknown, reason),
-                said("rate-limit-headers", Status::Working, None),
-                said("drop-legacy-auth", Status::Stopped, None),
+                for_minutes(said("add-retry-logic", Status::Working, None), 4),
+                for_minutes(said("fix-worktree-cleanup", Status::Stopped, None), 31),
+                for_minutes(said("spawn-form-choices", Status::Unknown, reason), 64),
+                for_minutes(said("rate-limit-headers", Status::Working, None), 121),
+                for_minutes(said("drop-legacy-auth", Status::Stopped, None), 7),
             ],
         }
     }
 
+    /// A row whose status has held this many minutes.
+    fn for_minutes(row: Row, minutes: u64) -> Row {
+        Row {
+            age: Some(Duration::from_mins(minutes)),
+            ..row
+        }
+    }
+
+    /// A row of a status the supervisor has just this moment read.
     fn said(name: &str, status: Status, reason: Option<&str>) -> Row {
         Row {
             name: name.to_string(),
             status,
             unaccounted: reason.map(|why| snapshot::cannot_account(why, None)),
             last_known: snapshot::last_read(status),
+            changed: Some(Instant::now()),
+            age: Some(Duration::ZERO),
         }
     }
 
@@ -695,13 +776,13 @@ mod tests {
 SPAWNS
 
 harness-launcher ●?·
- ●✻ fix-worktree-cleanup
- ?✻ spawn-form-choices
- ·✻ add-retry-logic
+ ●✻ fix-worktree-cleanup   31m
+ ?✻ spawn-form-choices    1h4m
+ ·✻ add-retry-logic         4m
 
 acme-api ●·
- ●✻ drop-legacy-auth
- ·✻ rate-limit-headers
+ ●✻ drop-legacy-auth        7m
+ ·✻ rate-limit-headers    2h1m
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -725,13 +806,13 @@ F10 quits — nothing is killed"
 SPAWNS
 
 harness-launcher ●?·
- ●✻ fix-worktree-cleanup
- ?✻ spawn-form-choices
-▍·✻ add-retry-logic
+ ●✻ fix-worktree-cleanup       31m
+ ?✻ spawn-form-choices        1h4m
+▍·✻ add-retry-logic             4m
 
 acme-api ●·
- ●✻ drop-legacy-auth
- ·✻ rate-limit-headers
+ ●✻ drop-legacy-auth            7m
+ ·✻ rate-limit-headers        2h1m
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -791,12 +872,12 @@ SPAWNS
  +  fix the worktree cleanup
 
 harness-launcher ●?·
- ●✻ fix-worktree-cleanup
- ?✻ spawn-form-choices
- ·✻ add-retry-logic
+ ●✻ fix-worktree-cleanup   31m
+ ?✻ spawn-form-choices    1h4m
+ ·✻ add-retry-logic         4m
 
 acme-api ●·
- ●✻ drop-legacy-auth
+ ●✻ drop-legacy-auth        7m
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -1047,10 +1128,9 @@ F10 quits — nothing is killed"
             "an-extremely-long-spawn-name-indeed",
         )];
         let snapshot = Snapshot {
-            rows: vec![said(
-                "an-extremely-long-spawn-name-indeed",
-                Status::Working,
-                None,
+            rows: vec![for_minutes(
+                said("an-extremely-long-spawn-name-indeed", Status::Working, None),
+                31,
             )],
         };
 
@@ -1076,10 +1156,9 @@ F10 quits — nothing is …"
     fn a_wider_list_is_a_wider_layout_and_not_the_same_one_with_space_beside_it() {
         let entries = vec![entry("acme-api", "an-extremely-long-spawn-name-indeed")];
         let snapshot = Snapshot {
-            rows: vec![said(
-                "an-extremely-long-spawn-name-indeed",
-                Status::Working,
-                None,
+            rows: vec![for_minutes(
+                said("an-extremely-long-spawn-name-indeed", Status::Working, None),
+                31,
             )],
         };
 
@@ -1117,9 +1196,15 @@ F10 quits — nothing is …"
             .iter()
             .map(|(repository, spawn)| entry(repository, spawn))
             .collect();
+        // A spread of ages, so a pinned screen shows the column doing its job.
         let rows = named
             .iter()
-            .map(|(_, spawn)| said(spawn, status(spawn), None))
+            .enumerate()
+            .map(|(at, (_, spawn))| {
+                let minutes = u64::try_from(at).unwrap_or_default();
+
+                for_minutes(said(spawn, status(spawn), None), 3 + minutes * 11)
+            })
             .collect();
 
         (entries, Snapshot { rows })
@@ -1137,28 +1222,28 @@ F10 quits — nothing is …"
 SPAWNS
 
 acme-api ●?··········
- ●✻ task-03
- ?✻ task-07
- ·✻ task-01
- ·✻ task-02
- ·✻ task-04
- ·✻ task-05
- ·✻ task-06
- ·✻ task-08
- ·✻ task-09
- ·✻ task-10
- ·✻ task-11
- ·✻ task-12
+ ●✻ task-03                25m
+ ?✻ task-07               1h9m
+ ·✻ task-01                 3m
+ ·✻ task-02                14m
+ ·✻ task-04                36m
+ ·✻ task-05                47m
+ ·✻ task-06                58m
+ ·✻ task-08              1h20m
+ ·✻ task-09              1h31m
+ ·✻ task-10              1h42m
+ ·✻ task-11              1h53m
+ ·✻ task-12               2h4m
 
 dotfiles ●·······
- ●✻ chore-02
- ·✻ chore-01
- ·✻ chore-03
- ·✻ chore-04
- ·✻ chore-05
- ·✻ chore-06
- ·✻ chore-07
- ·✻ chore-08
+ ●✻ chore-02             2h26m
+ ·✻ chore-01             2h15m
+ ·✻ chore-03             2h37m
+ ·✻ chore-04             2h48m
+ ·✻ chore-05             2h59m
+ ·✻ chore-06             3h10m
+ ·✻ chore-07             3h21m
+ ·✻ chore-08             3h32m
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
@@ -1329,37 +1414,253 @@ F10 quits — nothing is killed"
 SPAWNS
 
 harness-launcher ●····
- ●✻ prune-stale-symlinks
- ·✻ fix-worktree-cleanup
- ·✻ control-mode-backpressure
- ·✻ status-ladder-grace-period
- ·✻ rotate-the-deploy-keys
+ ●✻ prune-stale-symlinks                                       25m
+ ·✻ fix-worktree-cleanup                                        3m
+ ·✻ control-mode-backpressure                                  14m
+ ·✻ status-ladder-grace-period                                 36m
+ ·✻ rotate-the-deploy-keys                                     47m
 
 acme-api ●····
- ●✻ idempotency-keys
- ·✻ add-retry-logic
- ·✻ rate-limit-headers
- ·✻ terraform-state-locking
- ·✻ alert-on-disk-pressure
+ ●✻ idempotency-keys                                         1h20m
+ ·✻ add-retry-logic                                            58m
+ ·✻ rate-limit-headers                                        1h9m
+ ·✻ terraform-state-locking                                  1h31m
+ ·✻ alert-on-disk-pressure                                   1h42m
 
 dotfiles ?····
- ?✻ font-fallback-for-emoji
- ·✻ drop-legacy-auth
- ·✻ tidy-the-shell-prompt
- ·✻ cheaper-log-retention
- ·✻ pagination-cursors
+ ?✻ font-fallback-for-emoji                                  2h15m
+ ·✻ drop-legacy-auth                                         1h53m
+ ·✻ tidy-the-shell-prompt                                     2h4m
+ ·✻ cheaper-log-retention                                    2h26m
+ ·✻ pagination-cursors                                       2h37m
 
 infra ●····
- ●✻ neovim-lsp-config
- ·✻ spawn-form-choices
- ·✻ openapi-drift-check
- ·✻ ssh-agent-forwarding
- ·✻ blue-green-cutover
+ ●✻ neovim-lsp-config                                        3h10m
+ ·✻ spawn-form-choices                                       2h48m
+ ·✻ openapi-drift-check                                      2h59m
+ ·✻ ssh-agent-forwarding                                     3h21m
+ ·✻ blue-green-cutover                                       3h32m
 F2 starts a draft
 F6 / F7 move the selection
 F9 retires the spawn
 F10 quits — nothing is killed"
         );
+    }
+
+    #[test]
+    fn an_age_is_written_in_minutes_until_it_is_written_in_hours_too() {
+        assert_eq!(written_as(Duration::from_secs(0)), "0m");
+        assert_eq!(written_as(Duration::from_secs(59)), "0m");
+        assert_eq!(written_as(Duration::from_mins(4)), "4m");
+        assert_eq!(written_as(Duration::from_mins(64)), "1h4m");
+        assert_eq!(written_as(Duration::from_mins(121)), "2h1m");
+        assert_eq!(written_as(Duration::from_hours(48)), "48h0m");
+    }
+
+    /// Pins acceptance criterion 3: the narrowest list on which every row
+    /// shows its age is the one that still writes every name in full.
+    #[test]
+    fn every_row_gets_the_same_age_column_however_wide_its_own_age_is() {
+        let screen = drawn(29, 14, &five(), &saying(None), &Cursor::default());
+
+        assert_eq!(
+            screen,
+            "\
+SPAWNS
+
+harness-launcher ●?·
+ ●✻ fix-worktree-cleanup  31m
+ ?✻ spawn-form-choices   1h4m
+ ·✻ add-retry-logic        4m
+
+acme-api ●·
+ ●✻ drop-legacy-auth       7m
+ ·✻ rate-limit-headers   2h1m
+F2 starts a draft
+F6 / F7 move the selection
+F9 retires the spawn
+F10 quits — nothing is killed"
+        );
+    }
+
+    /// Pins acceptance criterion 3: the list gives an age up before it gives a
+    /// name up, and it gives up only the age of the row that is short of room.
+    /// One cell narrower than the list above, and the twenty-character name
+    /// drops its own age. The four rows beside it keep theirs.
+    #[test]
+    fn a_row_too_long_for_its_age_drops_it_and_the_rows_beside_it_keep_theirs() {
+        let screen = drawn(28, 14, &five(), &saying(None), &Cursor::default());
+
+        assert_eq!(
+            screen,
+            "\
+SPAWNS
+
+harness-launcher ●?·
+ ●✻ fix-worktree-cleanup
+ ?✻ spawn-form-choices  1h4m
+ ·✻ add-retry-logic       4m
+
+acme-api ●·
+ ●✻ drop-legacy-auth      7m
+ ·✻ rate-limit-headers  2h1m
+F2 starts a draft
+F6 / F7 move the selection
+F9 retires the spawn
+F10 quits — nothing is kill…"
+        );
+    }
+
+    /// Whether a rendered line ends in an age rather than in a name. No spawn
+    /// or repository in these tests is named for a number.
+    fn ends_in_an_age(line: &str) -> bool {
+        line.rsplit(' ').next().is_some_and(|last| {
+            last.ends_with('m') && last.starts_with(|first: char| first.is_ascii_digit())
+        })
+    }
+
+    /// Every row that shows an age cuts its name at the same place, so the
+    /// ages share a right edge. That is what the column is for.
+    #[test]
+    fn the_rows_that_show_an_age_line_them_up_against_one_right_edge() {
+        for width in 20..40u16 {
+            let screen = drawn(width, 14, &five(), &saying(None), &Cursor::default());
+
+            for line in screen.lines().filter(|line| ends_in_an_age(line)) {
+                assert_eq!(
+                    line.chars().count(),
+                    usize::from(width),
+                    "at {width} columns an age sits off the right edge:\n{screen}"
+                );
+            }
+        }
+    }
+
+    /// Names come first at every width. A row that shows an age shows its
+    /// whole name beside it, so no name is ever cut to make room for an age.
+    #[test]
+    fn no_name_is_cut_to_make_room_for_an_age() {
+        for width in 10..60u16 {
+            let screen = drawn(width, 14, &five(), &saying(None), &Cursor::default());
+
+            for line in screen.lines().filter(|line| ends_in_an_age(line)) {
+                assert!(
+                    !line.contains(ELLIPSIS),
+                    "at {width} columns a name was cut for an age:\n{screen}"
+                );
+            }
+        }
+    }
+
+    /// A row with no age is not measured for the age column. It keeps the
+    /// whole room for its name, long enough to be cut, and the row beside it
+    /// keeps its own age.
+    #[test]
+    fn a_row_with_no_age_does_not_take_the_column_from_the_rows_that_have_one() {
+        let entries = vec![
+            entry("acme-api", "api-retry"),
+            entry("acme-api", "fix-the-worktree-cleanup-a7f3"),
+        ];
+        let snapshot = Snapshot {
+            rows: vec![for_minutes(said("api-retry", Status::Working, None), 31)],
+        };
+
+        let screen = drawn(28, 10, &entries, &snapshot, &Cursor::default());
+
+        let aged = screen
+            .lines()
+            .find(|line| line.contains("api-retry"))
+            .unwrap_or_else(|| panic!("the aged spawn has no row:\n{screen}"));
+        assert_eq!(aged, " ·✻ api-retry            31m");
+        let ageless = screen
+            .lines()
+            .find(|line| line.contains("fix-the-worktree"))
+            .unwrap_or_else(|| panic!("the spawn with no age has no row:\n{screen}"));
+        assert_eq!(ageless, "  ✻ fix-the-worktree-cleanu…");
+    }
+
+    #[test]
+    fn a_long_draft_title_keeps_the_room_the_age_column_takes_from_the_names() {
+        let drafts = drafting(&["fix the worktree cleanup so retiring refuses"]);
+
+        let screen = with_drafts(
+            29,
+            16,
+            drafts.all(),
+            &five(),
+            &saying(None),
+            &Cursor::default(),
+        );
+
+        assert!(
+            screen.contains(" +  fix the worktree cleanup…"),
+            "a draft's title was cut for an age the draft does not have:\n{screen}"
+        );
+        assert!(
+            screen.contains("31m"),
+            "a draft's title dragged the age column off the spawns:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_draft_has_no_age_because_it_has_no_status() {
+        let drafts = drafting(&["fix the worktree cleanup"]);
+
+        let screen = with_drafts(
+            30,
+            15,
+            drafts.all(),
+            &five(),
+            &saying(None),
+            &Cursor::default(),
+        );
+
+        let drafted = screen
+            .lines()
+            .find(|line| line.contains("fix the worktree cleanup"))
+            .unwrap_or_else(|| panic!("the draft has no row:\n{screen}"));
+        assert_eq!(drafted, " +  fix the worktree cleanup");
+    }
+
+    #[test]
+    fn a_spawn_the_app_has_heard_nothing_about_shows_no_age() {
+        let entries = five();
+        let snapshot = Snapshot {
+            rows: vec![for_minutes(
+                said("add-retry-logic", Status::Working, None),
+                4,
+            )],
+        };
+
+        let screen = drawn(30, 16, &entries, &snapshot, &Cursor::default());
+
+        let heard_nothing = screen
+            .lines()
+            .find(|line| line.contains("fix-worktree-cleanup"))
+            .unwrap_or_else(|| panic!("the spawn has no row:\n{screen}"));
+        assert_eq!(heard_nothing, "  ✻ fix-worktree-cleanup");
+    }
+
+    /// A spawn an earlier run left running has no age: the app was not
+    /// watching when its status began, and `0m` would be a confident lie. It
+    /// keeps the whole width for its name, like a spawn with no row at all.
+    #[test]
+    fn a_spawn_adopted_from_an_earlier_run_shows_no_age_at_all() {
+        let entries = vec![entry("harness-launcher", "add-retry-logic-a7f3")];
+        let snapshot = Snapshot {
+            rows: vec![Row {
+                age: None,
+                ..said("add-retry-logic-a7f3", Status::Unknown, None)
+            }],
+        };
+
+        let screen = drawn(30, 10, &entries, &snapshot, &Cursor::default());
+
+        let row = screen
+            .lines()
+            .find(|line| line.contains("add-retry-logic-a7f3"))
+            .unwrap_or_else(|| panic!("the spawn has no row:\n{screen}"));
+        assert_eq!(row, " ?✻ add-retry-logic-a7f3");
     }
 
     #[test]

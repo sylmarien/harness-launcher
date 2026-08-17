@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::xdg;
 
 /// The directory every worktree the app creates lives under.
 pub fn root() -> Result<PathBuf> {
@@ -56,19 +57,11 @@ pub fn under(root: &Path) -> Vec<String> {
 
 /// Resolve the root from the environment, XDG first.
 fn root_from(data_home: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
-    let base = match data_home {
-        Some(data_home) if !data_home.is_empty() => PathBuf::from(data_home),
-        _ => match home {
-            Some(home) if !home.is_empty() => Path::new(&home).join(".local").join("share"),
-            _ => {
-                return Err(Error::new(
-                    "neither $XDG_DATA_HOME nor $HOME is set, so there is nowhere to put worktrees",
-                ));
-            }
-        },
-    };
+    let base = xdg::under(data_home, home, ".local/share").ok_or_else(|| {
+        Error::new("neither $XDG_DATA_HOME nor $HOME is set, so there is nowhere to put worktrees")
+    })?;
 
-    Ok(base.join("harness-launcher").join("worktrees"))
+    Ok(base.join("worktrees"))
 }
 
 #[cfg(test)]
@@ -76,25 +69,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_root_follows_xdg_when_it_is_set() {
-        let root = root_from(Some("/data".into()), Some("/home/someone".into())).unwrap();
-
-        assert_eq!(root, PathBuf::from("/data/harness-launcher/worktrees"));
-    }
-
-    #[test]
-    fn without_xdg_the_root_falls_back_to_the_home_directory() {
+    fn the_root_lands_under_the_data_directory() {
         let root = root_from(None, Some("/home/someone".into())).unwrap();
-
-        assert_eq!(
-            root,
-            PathBuf::from("/home/someone/.local/share/harness-launcher/worktrees")
-        );
-    }
-
-    #[test]
-    fn an_empty_xdg_variable_is_treated_as_unset() {
-        let root = root_from(Some("".into()), Some("/home/someone".into())).unwrap();
 
         assert_eq!(
             root,

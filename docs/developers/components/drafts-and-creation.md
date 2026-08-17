@@ -3,7 +3,8 @@
 The path from typing a description to a running harness. `src/draft.rs` owns
 the form, the record, and the discard question. `src/creation.rs` owns the
 making. Naming lives in `src/names.rs`, the command-line entry in
-`src/cli.rs`. `src/app.rs` handles a finished creation's arrival.
+`src/cli.rs`. `src/projects.rs` owns the configuration file and the saved
+projects in it. `src/app.rs` handles a finished creation's arrival.
 
 ## What a draft is
 
@@ -47,11 +48,40 @@ F6 / F7 leave it — nothing is lost
   rather than drawing it empty, so a harness offering no such choice is
   ordinary, not a special case ([the harness seam](the-harness-seam.md)).
 - Navigation: `Tab` / `Shift-Tab` cycle the controls, wrapping; `↑` / `↓`
-  move within a choice list, stopping at the ends. `Enter` is a line break
-  in Work (a paragraph) but *done with this control* in Repository (a path
-  has no lines) and in a choice list. The caret appears only where the
-  keyboard can type.
+  move within a choice list and within Repository's suggestions, stopping at
+  the ends. `Enter` is a line break in Work (a paragraph) but *done with this
+  control* in Repository (a path has no lines) and in a choice list. The
+  caret appears only where the keyboard can type.
 - Marks and the gutter come from [the screen](the-screen.md)'s scaffolding.
+
+## Saved projects
+
+A **project** is a name and a path (`projects::Project`). The user-facing
+format is in [saved projects](../../users/saved-projects.md).
+
+- **One file, read at start-up.** `$XDG_CONFIG_HOME/harness-launcher/config.toml`,
+  falling back to `~/.config` when the variable says nothing. `xdg::under`
+  resolves it, and the worktree root with it.
+- **`main::spawn` reads it** beside `worktrees::root`, before the screen is
+  taken over. `Drafts` holds the list and hands every draft a copy.
+- **No file is no projects.** A file that does not parse, or one that cannot
+  be read for another reason, refuses at start-up and names the file. The file
+  is written by hand, so a mistake in it is reported rather than skipped.
+- **The app never writes it.** A project is added by editing the file.
+- **Matching and ranking** (`projects::matching`) follow the rule in
+  [saved projects](../../users/saved-projects.md), which is where it is
+  written down.
+- **The suggestions** are drawn under the repository field while the keyboard
+  is in it, from the same marked lines a choice list uses (`marked` in
+  `src/draft.rs`). `↑` and `↓` are the only keys that pick one, and
+  `Draft::suggestion` is `None` until one of them is pressed. `Enter` and
+  `Tab` both leave the pick standing; a key that changes the text drops it,
+  because it changes which projects the text matches.
+- **`Draft::submitted` resolves the name** through `Draft::resolved`. A name
+  typed out in full is that project's path, matched without case the way the
+  suggestions are matched. Otherwise only a picked suggestion resolves, so
+  text matching several projects reaches `Wanted` as the path it says it is.
+- **The command line resolves no names.** `src/cli.rs` takes a path.
 
 ## Two ways to `Wanted`
 

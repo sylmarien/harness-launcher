@@ -3,6 +3,10 @@ name = "harness-launcher"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+# The oldest rustc this builds under, which cargo checks before it compiles
+# anything. Without it an old toolchain fails part-way through, naming a
+# dependency rather than this project.
+rust-version = "1.88"
 
 # Clippy's warn-by-default groups are not the whole of it. `pedantic` is the one
 # worth adding here: it is opinionated rather than unstable, and most of what it
@@ -18,7 +22,9 @@ pedantic = { level = "warn", priority = -1 }
 [dependencies]
 portable-pty = "0.9"
 ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
 vt100 = "0.16"
 
 [dev-dependencies]

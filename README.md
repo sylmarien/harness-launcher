@@ -28,8 +28,11 @@ You need git, tmux, [rustup](https://rustup.rs), and
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) logged in. Then:
 
 ```
-cargo run
+cargo install --git https://github.com/sylmarien/harness-launcher
+harness-launcher
 ```
+
+From a clone, run `cargo install --path .` instead.
 
 The app opens on a blank form. Write where the work should happen and what
 you want done, then press `F5`. The app creates a worktree and a branch,
@@ -37,8 +40,8 @@ starts the agent, and shows the live session. You can also pass everything on
 the command line:
 
 ```
-cargo run -- ~/code/api "add rate-limit headers" \
-       --and ~/code/web "fix the flaky login test" --model sonnet
+harness-launcher ~/code/api "add rate-limit headers" \
+                 --and ~/code/web "fix the flaky login test" --model sonnet
 ```
 
 [`docs/users/getting-started.md`](docs/users/getting-started.md) covers this
